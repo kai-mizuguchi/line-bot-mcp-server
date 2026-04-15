@@ -22,13 +22,8 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { createHmac } from "node:crypto";
 
-// Write to BOTH stdout and stderr to maximise visibility in cloud log aggregators
-process.stdout.write(
-  `[boot] Node.js started. PORT=${process.env.PORT ?? "(not set)"}, NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}\n`,
-);
-process.stderr.write(
-  `[boot] Node.js started. PORT=${process.env.PORT ?? "(not set)"}, NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}\n`,
-);
+// Use console.log (stdout) so Render captures it regardless of log driver config
+console.log(`[boot] Node.js ${process.version} started. PORT=${process.env.PORT ?? "(not set)"}, NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}`);
 
 process.on("uncaughtException", err => {
   process.stderr.write(`[fatal] uncaughtException: ${err.message}\n${err.stack}\n`);
@@ -185,11 +180,10 @@ async function main() {
   );
 
   if (!process.env.CHANNEL_ACCESS_TOKEN) {
-    process.stderr.write("[startup] ERROR: CHANNEL_ACCESS_TOKEN not set\n");
-    process.exit(1);
+    process.stderr.write("[startup] WARNING: CHANNEL_ACCESS_TOKEN not set — MCP tools will fail at runtime\n");
   }
 
-  const port = process.env.PORT || (!process.stdin.isTTY ? "10000" : "");
+  const port = process.env.PORT || "10000";
 
   if (port) {
     const transports: Record<string, InstanceType<typeof import("@modelcontextprotocol/sdk/server/sse.js")["SSEServerTransport"]>> = {};
