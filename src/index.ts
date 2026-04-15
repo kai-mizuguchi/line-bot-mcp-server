@@ -16,170 +16,212 @@
  * under the License.
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+// Static imports: ONLY Node.js built-ins.
+// Third-party packages are loaded dynamically AFTER the HTTP server binds to
+// its port, so Render's port-detection succeeds even on slow/OOM starts.
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { createHmac } from "node:crypto";
-import * as line from "@line/bot-sdk";
-import { LINE_BOT_MCP_SERVER_VERSION, USER_AGENT } from "./version.js";
-import CancelRichMenuDefault from "./tools/cancelRichMenuDefault.js";
-import PushTextMessage from "./tools/pushTextMessage.js";
-import PushFlexMessage from "./tools/pushFlexMessage.js";
-import BroadcastTextMessage from "./tools/broadcastTextMessage.js";
-import BroadcastFlexMessage from "./tools/broadcastFlexMessage.js";
-import GetProfile from "./tools/getProfile.js";
-import GetMessageQuota from "./tools/getMessageQuota.js";
-import GetRichMenuList from "./tools/getRichMenuList.js";
-import DeleteRichMenu from "./tools/deleteRichMenu.js";
-import SetRichMenuDefault from "./tools/setRichMenuDefault.js";
-import CreateRichMenu from "./tools/createRichMenu.js";
-import GetFollowerIds from "./tools/getFollowerIds.js";
 
-// Early boot diagnostic — runs after all static imports resolve
 process.stderr.write(
-  `[boot] index.js loaded OK. PORT=${process.env.PORT ?? "(not set)"}, NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}\n`,
+  `[boot] Node.js started. PORT=${process.env.PORT ?? "(not set)"}, NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}\n`,
 );
 
 process.on("uncaughtException", err => {
-  process.stderr.write(
-    `[boot] uncaughtException: ${err.message}\n${err.stack}\n`,
-  );
+  process.stderr.write(`[fatal] uncaughtException: ${err.message}\n${err.stack}\n`);
   process.exit(1);
 });
-
 process.on("unhandledRejection", reason => {
-  process.stderr.write(`[boot] unhandledRejection: ${reason}\n`);
+  process.stderr.write(`[fatal] unhandledRejection: ${reason}\n`);
   process.exit(1);
 });
 
-const channelAccessToken = process.env.CHANNEL_ACCESS_TOKEN || "";
-const channelSecret = process.env.CHANNEL_SECRET || "";
-const destinationId = process.env.DESTINATION_USER_ID || "";
-const messagingApiBaseUrl = process.env.LINE_MESSAGING_API_BASE_URL;
+// ---------------------------------------------------------------------------
+// Lazy application loader
+// ---------------------------------------------------------------------------
 
-const messagingApiClient = new line.messagingApi.MessagingApiClient({
-  channelAccessToken: channelAccessToken,
-  baseURL: messagingApiBaseUrl,
-  defaultHeaders: {
-    "User-Agent": USER_AGENT,
-  },
-});
+type App = Awaited<ReturnType<typeof loadApp>>;
+let appPromise: Promise<App> | null = null;
+function getApp(): Promise<App> {
+  if (!appPromise) appPromise = loadApp();
+  return appPromise;
+}
 
-const lineBlobClient = new line.messagingApi.MessagingApiBlobClient({
-  channelAccessToken: channelAccessToken,
-  defaultHeaders: {
-    "User-Agent": USER_AGENT,
-  },
-});
+async function loadApp() {
+  process.stderr.write("[boot] Loading npm modules...\n");
 
-function createMCPServer(): McpServer {
-  const server = new McpServer({
-    name: "line-bot",
-    version: LINE_BOT_MCP_SERVER_VERSION,
+  const [
+    { McpServer },
+    { SSEServerTransport },
+    { StdioServerTransport },
+    line,
+    { LINE_BOT_MCP_SERVER_VERSION, USER_AGENT },
+    { default: CancelRichMenuDefault },
+    { default: PushTextMessage },
+    { default: PushFlexMessage },
+    { default: BroadcastTextMessage },
+    { default: BroadcastFlexMessage },
+    { default: GetProfile },
+    { default: GetMessageQuota },
+    { default: GetRichMenuList },
+    { default: DeleteRichMenu },
+    { default: SetRichMenuDefault },
+    { default: CreateRichMenu },
+    { default: GetFollowerIds },
+  ] = await Promise.all([
+    import("@modelcontextprotocol/sdk/server/mcp.js"),
+    import("@modelcontextprotocol/sdk/server/sse.js"),
+    import("@modelcontextprotocol/sdk/server/stdio.js"),
+    import("@line/bot-sdk"),
+    import("./version.js"),
+    import("./tools/cancelRichMenuDefault.js"),
+    import("./tools/pushTextMessage.js"),
+    import("./tools/pushFlexMessage.js"),
+    import("./tools/broadcastTextMessage.js"),
+    import("./tools/broadcastFlexMessage.js"),
+    import("./tools/getProfile.js"),
+    import("./tools/getMessageQuota.js"),
+    import("./tools/getRichMenuList.js"),
+    import("./tools/deleteRichMenu.js"),
+    import("./tools/setRichMenuDefault.js"),
+    import("./tools/createRichMenu.js"),
+    import("./tools/getFollowerIds.js"),
+  ]);
+
+  process.stderr.write("[boot] npm modules loaded OK\n");
+
+  const channelAccessToken = process.env.CHANNEL_ACCESS_TOKEN || "";
+  const channelSecret = process.env.CHANNEL_SECRET || "";
+  const destinationId = process.env.DESTINATION_USER_ID || "";
+  const messagingApiBaseUrl = process.env.LINE_MESSAGING_API_BASE_URL;
+
+  const messagingApiClient = new line.messagingApi.MessagingApiClient({
+    channelAccessToken,
+    baseURL: messagingApiBaseUrl,
+    defaultHeaders: { "User-Agent": USER_AGENT },
   });
 
-  new PushTextMessage(messagingApiClient, destinationId).register(server);
-  new PushFlexMessage(messagingApiClient, destinationId).register(server);
-  new BroadcastTextMessage(messagingApiClient).register(server);
-  new BroadcastFlexMessage(messagingApiClient).register(server);
-  new GetProfile(messagingApiClient, destinationId).register(server);
-  new GetMessageQuota(messagingApiClient).register(server);
-  new GetRichMenuList(messagingApiClient).register(server);
-  new DeleteRichMenu(messagingApiClient).register(server);
-  new SetRichMenuDefault(messagingApiClient).register(server);
-  new CancelRichMenuDefault(messagingApiClient).register(server);
-  new CreateRichMenu(messagingApiClient, lineBlobClient).register(server);
-  new GetFollowerIds(messagingApiClient).register(server);
+  const lineBlobClient = new line.messagingApi.MessagingApiBlobClient({
+    channelAccessToken,
+    defaultHeaders: { "User-Agent": USER_AGENT },
+  });
 
-  return server;
-}
-
-async function readBody(req: IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+  function createMCPServer() {
+    const server = new McpServer({
+      name: "line-bot",
+      version: LINE_BOT_MCP_SERVER_VERSION,
+    });
+    new PushTextMessage(messagingApiClient, destinationId).register(server);
+    new PushFlexMessage(messagingApiClient, destinationId).register(server);
+    new BroadcastTextMessage(messagingApiClient).register(server);
+    new BroadcastFlexMessage(messagingApiClient).register(server);
+    new GetProfile(messagingApiClient, destinationId).register(server);
+    new GetMessageQuota(messagingApiClient).register(server);
+    new GetRichMenuList(messagingApiClient).register(server);
+    new DeleteRichMenu(messagingApiClient).register(server);
+    new SetRichMenuDefault(messagingApiClient).register(server);
+    new CancelRichMenuDefault(messagingApiClient).register(server);
+    new CreateRichMenu(messagingApiClient, lineBlobClient).register(server);
+    new GetFollowerIds(messagingApiClient).register(server);
+    return server;
   }
-  return Buffer.concat(chunks);
-}
 
-function verifyLineSignature(
-  body: Buffer,
-  signature: string,
-  secret: string,
-): boolean {
-  const hash = createHmac("sha256", secret).update(body).digest("base64");
-  return hash === signature;
-}
+  async function handleWebhook(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(
+        Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string),
+      );
+    }
+    const body = Buffer.concat(chunks);
+    const signature = req.headers["x-line-signature"] as string;
 
-async function handleWebhook(
-  req: IncomingMessage,
-  res: ServerResponse,
-): Promise<void> {
-  const body = await readBody(req);
-  const signature = req.headers["x-line-signature"] as string;
+    if (channelSecret) {
+      const hash = createHmac("sha256", channelSecret)
+        .update(body)
+        .digest("base64");
+      if (!signature || hash !== signature) {
+        res.writeHead(403);
+        res.end("Invalid signature");
+        return;
+      }
+    }
 
-  if (channelSecret) {
-    if (!signature || !verifyLineSignature(body, signature, channelSecret)) {
-      res.writeHead(403);
-      res.end("Invalid signature");
-      return;
+    res.writeHead(200);
+    res.end("OK");
+
+    const payload = JSON.parse(body.toString());
+    for (const event of payload.events ?? []) {
+      if (event.type === "message" && event.replyToken) {
+        await messagingApiClient.replyMessage({
+          replyToken: event.replyToken,
+          messages: [{ type: "text", text: "Claudeです！" }],
+        });
+      }
     }
   }
 
-  res.writeHead(200);
-  res.end("OK");
-
-  const payload = JSON.parse(body.toString());
-  for (const event of payload.events ?? []) {
-    if (event.type === "message" && event.replyToken) {
-      await messagingApiClient.replyMessage({
-        replyToken: event.replyToken,
-        messages: [{ type: "text", text: "Claudeです！" }],
-      });
-    }
-  }
+  return {
+    createMCPServer,
+    handleWebhook,
+    SSEServerTransport,
+    StdioServerTransport,
+  };
 }
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
 async function main() {
-  console.error(
-    `[startup] LINE Bot MCP Server v${LINE_BOT_MCP_SERVER_VERSION} starting...`,
-  );
-  console.error(`[startup] PORT=${process.env.PORT ?? "(not set)"}`);
-  console.error(
-    `[startup] CHANNEL_ACCESS_TOKEN=${process.env.CHANNEL_ACCESS_TOKEN ? "set" : "not set"}`,
+  process.stderr.write(
+    `[startup] CHANNEL_ACCESS_TOKEN=${process.env.CHANNEL_ACCESS_TOKEN ? "set" : "NOT SET"}\n`,
   );
 
   if (!process.env.CHANNEL_ACCESS_TOKEN) {
-    console.error("Please set CHANNEL_ACCESS_TOKEN");
+    process.stderr.write("[startup] ERROR: CHANNEL_ACCESS_TOKEN not set\n");
     process.exit(1);
   }
 
-  // Use PORT if set (Render injects it for Web Services).
-  // Fall back to 10000 when stdin is not a TTY (e.g. Docker without PORT).
   const port = process.env.PORT || (!process.stdin.isTTY ? "10000" : "");
 
   if (port) {
-    const transports: Record<string, SSEServerTransport> = {};
+    const transports: Record<string, InstanceType<typeof import("@modelcontextprotocol/sdk/server/sse.js")["SSEServerTransport"]>> = {};
 
+    // Start HTTP server FIRST — before any npm module loads.
+    // This makes Render's port scanner succeed immediately.
     const httpServer = createServer((req, res) => {
       (async () => {
-        if (req.method === "POST" && req.url === "/webhook") {
-          await handleWebhook(req, res);
-        } else if (req.method === "GET" && req.url === "/sse") {
-          const server = createMCPServer();
-          const transport = new SSEServerTransport("/message", res);
-          transports[transport.sessionId] = transport;
+        // Health / root — always available, no npm modules needed
+        if (
+          req.method === "GET" &&
+          (req.url === "/" || req.url === "/health")
+        ) {
+          res.writeHead(200);
+          res.end("LINE Bot MCP Server is running");
+          return;
+        }
 
+        // All other routes need the full app
+        const app = await getApp();
+
+        if (req.method === "POST" && req.url === "/webhook") {
+          await app.handleWebhook(req, res);
+        } else if (req.method === "GET" && req.url === "/sse") {
+          const server = app.createMCPServer();
+          const transport = new app.SSEServerTransport("/message", res);
+          transports[transport.sessionId] = transport;
           res.on("close", () => {
             delete transports[transport.sessionId];
           });
-
           await server.connect(transport);
         } else if (req.method === "POST" && req.url?.startsWith("/message")) {
-          const url = new URL(req.url, `http://localhost`);
-          const sessionId = url.searchParams.get("sessionId");
-
+          const sessionId = new URL(
+            req.url,
+            "http://localhost",
+          ).searchParams.get("sessionId");
           if (sessionId && transports[sessionId]) {
             await transports[sessionId].handlePostMessage(req, res);
           } else {
@@ -190,8 +232,8 @@ async function main() {
           res.writeHead(200);
           res.end("LINE Bot MCP Server is running");
         }
-      })().catch(error => {
-        console.error("Error handling request:", error);
+      })().catch(err => {
+        process.stderr.write(`[request] Error: ${err.message}\n`);
         if (!res.headersSent) {
           res.writeHead(500);
           res.end("Internal server error");
@@ -200,21 +242,35 @@ async function main() {
     });
 
     httpServer.on("error", err => {
-      console.error("HTTP server error:", err);
+      process.stderr.write(`[startup] HTTP server error: ${err.message}\n`);
       process.exit(1);
     });
 
     httpServer.listen(parseInt(port), () => {
-      console.error(`[startup] HTTP server listening on port ${port}`);
+      process.stderr.write(
+        `[startup] HTTP server listening on port ${port}\n`,
+      );
     });
+
+    // Load npm modules in the background after the port is bound
+    getApp()
+      .then(() => process.stderr.write("[startup] Application ready\n"))
+      .catch(err =>
+        process.stderr.write(
+          `[startup] Module load failed: ${err.message}\n${err.stack}\n`,
+        ),
+      );
   } else {
-    const server = createMCPServer();
-    const transport = new StdioServerTransport();
+    // Stdio mode (local CLI)
+    process.stderr.write("[startup] Stdio mode\n");
+    const app = await getApp();
+    const server = app.createMCPServer();
+    const transport = new app.StdioServerTransport();
     await server.connect(transport);
   }
 }
 
-main().catch(error => {
-  console.error("Fatal error in main():", error);
+main().catch(err => {
+  process.stderr.write(`[fatal] main() failed: ${err.message}\n${err.stack}\n`);
   process.exit(1);
 });
