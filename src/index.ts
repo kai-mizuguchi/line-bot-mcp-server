@@ -19,7 +19,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { createServer } from "node:http";
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { createHmac } from "node:crypto";
 import * as line from "@line/bot-sdk";
 import { LINE_BOT_MCP_SERVER_VERSION, USER_AGENT } from "./version.js";
 import CancelRichMenuDefault from "./tools/cancelRichMenuDefault.js";
@@ -36,6 +37,7 @@ import CreateRichMenu from "./tools/createRichMenu.js";
 import GetFollowerIds from "./tools/getFollowerIds.js";
 
 const channelAccessToken = process.env.CHANNEL_ACCESS_TOKEN || "";
+const channelSecret = process.env.CHANNEL_SECRET || "";
 const destinationId = process.env.DESTINATION_USER_ID || "";
 const messagingApiBaseUrl = process.env.LINE_MESSAGING_API_BASE_URL;
 
@@ -76,6 +78,52 @@ function createMCPServer(): McpServer {
   return server;
 }
 
+async function readBody(req: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+  }
+  return Buffer.concat(chunks);
+}
+
+function verifyLineSignature(
+  body: Buffer,
+  signature: string,
+  secret: string,
+): boolean {
+  const hash = createHmac("sha256", secret).update(body).digest("base64");
+  return hash === signature;
+}
+
+async function handleWebhook(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const body = await readBody(req);
+  const signature = req.headers["x-line-signature"] as string;
+
+  if (channelSecret) {
+    if (!signature || !verifyLineSignature(body, signature, channelSecret)) {
+      res.writeHead(403);
+      res.end("Invalid signature");
+      return;
+    }
+  }
+
+  res.writeHead(200);
+  res.end("OK");
+
+  const payload = JSON.parse(body.toString());
+  for (const event of payload.events ?? []) {
+    if (event.type === "message" && event.replyToken) {
+      await messagingApiClient.replyMessage({
+        replyToken: event.replyToken,
+        messages: [{ type: "text", text: "Claudeです！" }],
+      });
+    }
+  }
+}
+
 async function main() {
   console.error(
     `[startup] LINE Bot MCP Server v${LINE_BOT_MCP_SERVER_VERSION} starting...`,
@@ -99,7 +147,9 @@ async function main() {
 
     const httpServer = createServer((req, res) => {
       (async () => {
-        if (req.method === "GET" && req.url === "/sse") {
+        if (req.method === "POST" && req.url === "/webhook") {
+          await handleWebhook(req, res);
+        } else if (req.method === "GET" && req.url === "/sse") {
           const server = createMCPServer();
           const transport = new SSEServerTransport("/message", res);
           transports[transport.sessionId] = transport;
