@@ -54,10 +54,13 @@ WORKDIR /app
 # Install only production dependencies first, then fix ownership
 RUN npm ci --ignore-scripts --omit=dev
 
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
 RUN chown -R appuser:appgroup /app
 
 # Switch to non-root user
 USER appuser
 
 # Define how to start the application
-ENTRYPOINT ["node", "dist/index.js"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

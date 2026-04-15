@@ -22,6 +22,10 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { createHmac } from "node:crypto";
 
+// Write to BOTH stdout and stderr to maximise visibility in cloud log aggregators
+process.stdout.write(
+  `[boot] Node.js started. PORT=${process.env.PORT ?? "(not set)"}, NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}\n`,
+);
 process.stderr.write(
   `[boot] Node.js started. PORT=${process.env.PORT ?? "(not set)"}, NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}\n`,
 );
