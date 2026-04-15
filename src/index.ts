@@ -77,12 +77,21 @@ function createMCPServer(): McpServer {
 }
 
 async function main() {
+  console.error(
+    `[startup] LINE Bot MCP Server v${LINE_BOT_MCP_SERVER_VERSION} starting...`,
+  );
+  console.error(`[startup] PORT=${process.env.PORT ?? "(not set)"}`);
+  console.error(
+    `[startup] CHANNEL_ACCESS_TOKEN=${process.env.CHANNEL_ACCESS_TOKEN ? "set" : "not set"}`,
+  );
+
   if (!process.env.CHANNEL_ACCESS_TOKEN) {
     console.error("Please set CHANNEL_ACCESS_TOKEN");
     process.exit(1);
   }
 
-  const port = process.env.PORT;
+  // Use HTTP mode when PORT is set, or when stdin is not a TTY (e.g. Docker)
+  const port = process.env.PORT || (!process.stdin.isTTY ? "10000" : "");
 
   if (port) {
     // HTTP/SSE mode for Render and other cloud deployments
@@ -121,6 +130,11 @@ async function main() {
           res.end("Internal server error");
         }
       });
+    });
+
+    httpServer.on("error", err => {
+      console.error("HTTP server error:", err);
+      process.exit(1);
     });
 
     httpServer.listen(parseInt(port), () => {
