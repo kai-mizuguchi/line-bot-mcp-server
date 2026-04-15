@@ -19,7 +19,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { createServer } from "node:http";
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { createHmac } from "node:crypto";
 import * as line from "@line/bot-sdk";
 import { LINE_BOT_MCP_SERVER_VERSION, USER_AGENT } from "./version.js";
 import CancelRichMenuDefault from "./tools/cancelRichMenuDefault.js";
@@ -35,7 +36,25 @@ import SetRichMenuDefault from "./tools/setRichMenuDefault.js";
 import CreateRichMenu from "./tools/createRichMenu.js";
 import GetFollowerIds from "./tools/getFollowerIds.js";
 
+// Early boot diagnostic — runs after all static imports resolve
+process.stderr.write(
+  `[boot] index.js loaded OK. PORT=${process.env.PORT ?? "(not set)"}, NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}\n`,
+);
+
+process.on("uncaughtException", err => {
+  process.stderr.write(
+    `[boot] uncaughtException: ${err.message}\n${err.stack}\n`,
+  );
+  process.exit(1);
+});
+
+process.on("unhandledRejection", reason => {
+  process.stderr.write(`[boot] unhandledRejection: ${reason}\n`);
+  process.exit(1);
+});
+
 const channelAccessToken = process.env.CHANNEL_ACCESS_TOKEN || "";
+const channelSecret = process.env.CHANNEL_SECRET || "";
 const destinationId = process.env.DESTINATION_USER_ID || "";
 const messagingApiBaseUrl = process.env.LINE_MESSAGING_API_BASE_URL;
 
@@ -76,6 +95,52 @@ function createMCPServer(): McpServer {
   return server;
 }
 
+async function readBody(req: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+  }
+  return Buffer.concat(chunks);
+}
+
+function verifyLineSignature(
+  body: Buffer,
+  signature: string,
+  secret: string,
+): boolean {
+  const hash = createHmac("sha256", secret).update(body).digest("base64");
+  return hash === signature;
+}
+
+async function handleWebhook(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const body = await readBody(req);
+  const signature = req.headers["x-line-signature"] as string;
+
+  if (channelSecret) {
+    if (!signature || !verifyLineSignature(body, signature, channelSecret)) {
+      res.writeHead(403);
+      res.end("Invalid signature");
+      return;
+    }
+  }
+
+  res.writeHead(200);
+  res.end("OK");
+
+  const payload = JSON.parse(body.toString());
+  for (const event of payload.events ?? []) {
+    if (event.type === "message" && event.replyToken) {
+      await messagingApiClient.replyMessage({
+        replyToken: event.replyToken,
+        messages: [{ type: "text", text: "Claudeです！" }],
+      });
+    }
+  }
+}
+
 async function main() {
   console.error(
     `[startup] LINE Bot MCP Server v${LINE_BOT_MCP_SERVER_VERSION} starting...`,
@@ -90,16 +155,18 @@ async function main() {
     process.exit(1);
   }
 
-  // Use HTTP mode when PORT is set, or when stdin is not a TTY (e.g. Docker)
+  // Use PORT if set (Render injects it for Web Services).
+  // Fall back to 10000 when stdin is not a TTY (e.g. Docker without PORT).
   const port = process.env.PORT || (!process.stdin.isTTY ? "10000" : "");
 
   if (port) {
-    // HTTP/SSE mode for Render and other cloud deployments
     const transports: Record<string, SSEServerTransport> = {};
 
     const httpServer = createServer((req, res) => {
       (async () => {
-        if (req.method === "GET" && req.url === "/sse") {
+        if (req.method === "POST" && req.url === "/webhook") {
+          await handleWebhook(req, res);
+        } else if (req.method === "GET" && req.url === "/sse") {
           const server = createMCPServer();
           const transport = new SSEServerTransport("/message", res);
           transports[transport.sessionId] = transport;
@@ -138,10 +205,9 @@ async function main() {
     });
 
     httpServer.listen(parseInt(port), () => {
-      console.error(`LINE Bot MCP Server running on port ${port}`);
+      console.error(`[startup] HTTP server listening on port ${port}`);
     });
   } else {
-    // Stdio mode (default for local CLI use)
     const server = createMCPServer();
     const transport = new StdioServerTransport();
     await server.connect(transport);
