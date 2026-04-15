@@ -4,7 +4,7 @@ COPY . /app
 
 WORKDIR /app
 
-RUN --mount=type=cache,target=/root/.npm-production npm ci --ignore-scripts
+RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts
 
 RUN --mount=type=cache,target=/root/.npm npm run build
 
@@ -21,16 +21,16 @@ RUN apk add --no-cache \
     chromium \
     nss
 
-# Download and install Japanese fonts from GitHub
+# Download and install Japanese fonts (failures are non-fatal)
 RUN mkdir -p /usr/share/fonts/truetype/google && \
-    # Noto Sans JP from GitHub
-    curl -L "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansJP-Regular.otf" -o /usr/share/fonts/truetype/google/NotoSansJP-Regular.otf && \
-    curl -L "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansJP-Bold.otf" -o /usr/share/fonts/truetype/google/NotoSansJP-Bold.otf && \
-    # IPAex Gothic font as fallback
-    curl -L "https://moji.or.jp/wp-content/ipafont/IPAexfont/IPAexfont00401.zip" -o ipaex.zip && \
-    unzip ipaex.zip && \
-    cp IPAexfont00401/*.ttf /usr/share/fonts/truetype/google/ && \
-    rm -rf IPAexfont00401 ipaex.zip
+    { curl -L "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansJP-Regular.otf" \
+        -o /usr/share/fonts/truetype/google/NotoSansJP-Regular.otf || true; } && \
+    { curl -L "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansJP-Bold.otf" \
+        -o /usr/share/fonts/truetype/google/NotoSansJP-Bold.otf || true; } && \
+    { curl -L "https://moji.or.jp/wp-content/ipafont/IPAexfont/IPAexfont00401.zip" -o ipaex.zip && \
+      unzip ipaex.zip && \
+      cp IPAexfont00401/*.ttf /usr/share/fonts/truetype/google/ && \
+      rm -rf IPAexfont00401 ipaex.zip || true; }
 
 # Update font cache
 RUN fc-cache -f -v
@@ -38,8 +38,7 @@ RUN fc-cache -f -v
 # Set Puppeteer to use system Chromium
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
-# Set up a non-root user ('appuser'/'appgroup') to avoid running as root - good security practice!
-# (-S is the Alpine option for a system user/group, suitable here)
+# Set up a non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
 # Copy the built code and necessary package files from our builder stage
@@ -52,14 +51,12 @@ ENV NODE_ENV=production
 
 WORKDIR /app
 
-# Give our new 'appuser' ownership of the application files inside /app
-# Needs to happen after copying the files over
-RUN chown -R appuser:appgroup /app
-
-# Install *only* the production dependencies
+# Install only production dependencies first, then fix ownership
 RUN npm ci --ignore-scripts --omit=dev
 
-# Now, switch to running as our non-root user for the actual app process
+RUN chown -R appuser:appgroup /app
+
+# Switch to non-root user
 USER appuser
 
 # Define how to start the application
