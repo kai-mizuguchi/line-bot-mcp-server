@@ -6,7 +6,7 @@ WORKDIR /app
 
 RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts
 
-RUN --mount=type=cache,target=/root/.npm npm run build
+RUN npx tsc && chmod +x dist/*.js
 
 # --- Release Stage ---
 FROM node:24-alpine AS release
