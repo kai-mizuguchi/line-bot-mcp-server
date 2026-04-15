@@ -6,8 +6,6 @@ import {
 } from "../common/response.js";
 import { AbstractTool } from "./AbstractTool.js";
 import { z } from "zod";
-import { Marp } from "@marp-team/marp-core";
-import puppeteer from "puppeteer";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -161,6 +159,8 @@ async function generateRichMenuImage(
   }
 
   // 2. Convert Markdown to HTML using Marp
+  const { Marp } = await import("@marp-team/marp-core");
+  const { default: puppeteer } = await import("puppeteer");
   const marp = new Marp();
   const { html, css } = marp.render(content);
 
