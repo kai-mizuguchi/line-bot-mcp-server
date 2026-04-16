@@ -1,0 +1,34 @@
+import { createErrorResponse, createSuccessResponse, } from "../common/response.js";
+import { AbstractTool } from "./AbstractTool.js";
+import { z } from "zod";
+export default class SetRichMenuDefault extends AbstractTool {
+    client;
+    constructor(client) {
+        super();
+        this.client = client;
+    }
+    register(server) {
+        const richMenuIdSchema = z
+            .string()
+            .describe("The ID of the rich menu to set as default.");
+        server.registerTool("set_rich_menu_default", {
+            title: "Set Rich Menu Default",
+            description: "Set a rich menu as the default rich menu.",
+            inputSchema: {
+                richMenuId: richMenuIdSchema.describe("The ID of the rich menu to set as default."),
+            },
+            annotations: {
+                destructiveHint: true,
+            },
+        }, async ({ richMenuId }) => {
+            try {
+                const response = await this.client.setDefaultRichMenu(richMenuId);
+                return createSuccessResponse(response);
+            }
+            catch (error) {
+                return createErrorResponse(`Failed to set default rich menu: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        });
+    }
+}
+//# sourceMappingURL=setRichMenuDefault.js.map
