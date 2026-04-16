@@ -111,10 +111,12 @@ async function loadApp() {
     });
     // グループ内でメンション判定するために Bot 自身の userId を取得
     let botUserId = "";
+    let botDisplayName = "";
     try {
         const botInfo = await messagingApiClient.getBotInfo();
         botUserId = botInfo.userId;
-        log(`[boot] botUserId=${botUserId}`);
+        botDisplayName = botInfo.displayName;
+        log(`[boot] botUserId=${botUserId} displayName=${botDisplayName}`);
     }
     catch (err) {
         log(`[boot] getBotInfo failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -159,6 +161,20 @@ async function loadApp() {
         res.end("OK");
         const payload = JSON.parse(body.toString());
         for (const event of payload.events ?? []) {
+            // グループ/ルームに追加された時の自己紹介
+            if (event.type === "join" && event.replyToken) {
+                const name = botDisplayName || "豚人間くん";
+                await messagingApiClient.replyMessage({
+                    replyToken: event.replyToken,
+                    messages: [{
+                            type: "text",
+                            text: `はじめまして！${name}です。\n友だち追加ありがとうございます😉\n\nバンドやグループに関する様々な雑務をお手伝いさせていただきます！\n僕に何か頼みたいときは必ず僕宛にメンションをお願いします🐷`,
+                        }],
+                }).catch((err) => {
+                    log(`[webhook] join reply error: ${err instanceof Error ? err.message : String(err)}`);
+                });
+                continue;
+            }
             if (!(event.type === "message" && event.replyToken))
                 continue;
             const isGroupChat = event.source?.type === "group" || event.source?.type === "room";
