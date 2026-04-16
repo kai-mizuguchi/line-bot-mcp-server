@@ -67,6 +67,7 @@ async function loadApp() {
     const channelSecret = process.env.CHANNEL_SECRET || "";
     const destinationId = process.env.DESTINATION_USER_ID || "";
     const messagingApiBaseUrl = process.env.LINE_MESSAGING_API_BASE_URL;
+    const adminUserId = process.env.ADMIN_USER || "";
     const anthropic = new Anthropic();
     // system-prompt.md をサーバー起動時に読み込む
     let systemPrompt = "";
@@ -77,6 +78,10 @@ async function loadApp() {
     catch {
         log("[boot] WARNING: system-prompt.md not found — no system prompt");
     }
+    // 管理者向け：## Security セクションを除去したプロンプト（ロールハック対策なし）
+    const systemPromptAdmin = systemPrompt
+        .replace(/^## Security\n[\s\S]*?(?=^## )/m, "")
+        .trim();
     // Claude の返答から Markdown 記法を除去して LINE 向けプレーンテキストに変換
     function stripMarkdown(text) {
         return text
@@ -159,6 +164,7 @@ async function loadApp() {
             const isGroupChat = event.source?.type === "group" || event.source?.type === "room";
             const mentionees = event.message?.mention?.mentionees ?? [];
             const isMentioned = mentionees.some((m) => m.userId === botUserId);
+            const isAdmin = !!adminUserId && event.source?.userId === adminUserId;
             const historyKey = [
                 event.source?.groupId,
                 event.source?.roomId,
@@ -174,10 +180,12 @@ async function loadApp() {
                 hour: "2-digit",
                 minute: "2-digit",
             });
-            const systemWithDate = (systemPrompt ? systemPrompt + "\n\n" : "")
+            // 管理者は Security セクションなし、それ以外はフル system prompt
+            const basePrompt = isAdmin ? systemPromptAdmin : systemPrompt;
+            const systemWithDate = (basePrompt ? basePrompt + "\n\n" : "")
                 + `Current date/time (JST): ${now}`;
             if (event.message?.type === "text") {
-                // グループ/ルームの場合はメンションされた時だけ返信
+                // グループ/ルームの場合はメンションされた時だけ返信（管理者も同様）
                 if (isGroupChat && !isMentioned)
                     continue;
                 // メッセージからメンション部分（@Bot名）を除いてClaudeに渡す
