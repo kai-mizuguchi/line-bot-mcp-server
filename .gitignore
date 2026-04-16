@@ -32,8 +32,8 @@ node_modules/
 # dotenv environment variables file
 .env
 
-# Built files
-dist
+# Built files are committed so Render can deploy without TypeScript installed
+# dist
 
 # IDE
 .idea/

@@ -1,0 +1,32 @@
+import { createErrorResponse, createSuccessResponse, } from "../common/response.js";
+import { AbstractTool } from "./AbstractTool.js";
+export default class GetMessageQuota extends AbstractTool {
+    client;
+    constructor(client) {
+        super();
+        this.client = client;
+    }
+    register(server) {
+        server.registerTool("get_message_quota", {
+            title: "Get Message Quota",
+            description: "Get the message quota and consumption of the LINE Official Account. This shows the monthly message limit and current usage.",
+            annotations: {
+                readOnlyHint: true,
+            },
+        }, async () => {
+            try {
+                const messageQuotaResponse = await this.client.getMessageQuota();
+                const messageQuotaConsumptionResponse = await this.client.getMessageQuotaConsumption();
+                const response = {
+                    limited: messageQuotaResponse.value,
+                    totalUsage: messageQuotaConsumptionResponse.totalUsage,
+                };
+                return createSuccessResponse(response);
+            }
+            catch (error) {
+                return createErrorResponse(`Failed to get message quota: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        });
+    }
+}
+//# sourceMappingURL=getMessageQuota.js.map
