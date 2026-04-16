@@ -130,6 +130,11 @@ async function loadApp() {
   const conversationHistory = new Map<string, Message[]>();
   const MAX_HISTORY = 20;
 
+  // グループ内でメンション後に画像を待機するためのマップ
+  // key = historyKey, value = pendingになった時刻(ms)
+  const pendingImageState = new Map<string, number>();
+  const PENDING_IMAGE_TTL = 120_000; // 2分
+
   const messagingApiClient = new line.messagingApi.MessagingApiClient({
     channelAccessToken,
     baseURL: messagingApiBaseUrl,
@@ -200,12 +205,33 @@ async function loadApp() {
 
     const payload = JSON.parse(body.toString());
     for (const event of payload.events ?? []) {
-      if (event.type === "message" && event.replyToken && event.message?.type === "text") {
+      if (!(event.type === "message" && event.replyToken)) continue;
+
+      const isGroupChat = event.source?.type === "group" || event.source?.type === "room";
+      const mentionees: Array<{ index: number; length: number; userId?: string }> =
+        event.message?.mention?.mentionees ?? [];
+      const isMentioned = mentionees.some((m) => m.userId === botUserId);
+      const historyKey = [
+        event.source?.groupId,
+        event.source?.roomId,
+        event.source?.userId,
+      ].filter(Boolean).join(":");
+
+      // 現在日時（Asia/Tokyo）を system prompt に追記
+      const now = new Date().toLocaleString("ja-JP", {
+        timeZone: "Asia/Tokyo",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        weekday: "long",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      const systemWithDate = (systemPrompt ? systemPrompt + "\n\n" : "")
+        + `Current date/time (JST): ${now}`;
+
+      if (event.message?.type === "text") {
         // グループ/ルームの場合はメンションされた時だけ返信
-        const isGroupChat = event.source?.type === "group" || event.source?.type === "room";
-        const mentionees: Array<{ index: number; length: number; userId?: string }> =
-          event.message?.mention?.mentionees ?? [];
-        const isMentioned = mentionees.some((m) => m.userId === botUserId);
         if (isGroupChat && !isMentioned) continue;
 
         // メッセージからメンション部分（@Bot名）を除いてClaudeに渡す
@@ -218,20 +244,13 @@ async function loadApp() {
         if (!userText) continue;
 
         try {
-          // ユーザーIDで会話履歴を管理（グループではgroupId+userId）
-          const historyKey = [
-            event.source?.groupId,
-            event.source?.roomId,
-            event.source?.userId,
-          ].filter(Boolean).join(":");
           const history = conversationHistory.get(historyKey) ?? [];
-
           history.push({ role: "user", content: userText });
 
           const aiResponse = await anthropic.messages.create({
             model: "claude-haiku-4-5",
             max_tokens: 1000,
-            system: systemPrompt || undefined,
+            system: systemWithDate,
             messages: history,
           });
 
@@ -244,7 +263,69 @@ async function loadApp() {
           }
 
           history.push({ role: "assistant", content: replyText });
-          // 古い履歴を削除してメモリを節約
+          if (history.length > MAX_HISTORY) {
+            history.splice(0, history.length - MAX_HISTORY);
+          }
+          conversationHistory.set(historyKey, history);
+
+          // グループ内のメンション後に画像を2分間待機
+          pendingImageState.set(historyKey, Date.now());
+
+          await messagingApiClient.replyMessage({
+            replyToken: event.replyToken,
+            messages: [{ type: "text", text: replyText }],
+          });
+        } catch (err: unknown) {
+          log(`[webhook] Claude API error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+      } else if (event.message?.type === "image") {
+        if (isGroupChat) {
+          // グループ: メンション後2分以内の場合のみ処理
+          const pending = pendingImageState.get(historyKey);
+          if (!pending || Date.now() - pending > PENDING_IMAGE_TTL) continue;
+          pendingImageState.delete(historyKey);
+        }
+
+        try {
+          const stream = await lineBlobClient.getMessageContent(event.message.id);
+          const imgChunks: Buffer[] = [];
+          for await (const chunk of stream) {
+            imgChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+          }
+          const base64 = Buffer.concat(imgChunks).toString("base64");
+
+          const history = conversationHistory.get(historyKey) ?? [];
+
+          const aiResponse = await anthropic.messages.create({
+            model: "claude-haiku-4-5",
+            max_tokens: 1000,
+            system: systemWithDate,
+            messages: [
+              ...history,
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "image",
+                    source: { type: "base64", media_type: "image/jpeg", data: base64 },
+                  },
+                  { type: "text", text: "この画像について教えて" },
+                ],
+              },
+            ],
+          });
+
+          let replyText = "すみません、うまく応答できませんでした。";
+          for (const block of aiResponse.content) {
+            if (block.type === "text") {
+              replyText = stripMarkdown(block.text).slice(0, 5000);
+              break;
+            }
+          }
+
+          history.push({ role: "user", content: "[画像]" });
+          history.push({ role: "assistant", content: replyText });
           if (history.length > MAX_HISTORY) {
             history.splice(0, history.length - MAX_HISTORY);
           }
@@ -255,7 +336,19 @@ async function loadApp() {
             messages: [{ type: "text", text: replyText }],
           });
         } catch (err: unknown) {
-          log(`[webhook] Claude API error: ${err instanceof Error ? err.message : String(err)}`);
+          log(`[webhook] Vision error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+      } else {
+        // スタンプ・音声・ファイルなど未対応メッセージ
+        if (isGroupChat && !isMentioned) continue;
+        try {
+          await messagingApiClient.replyMessage({
+            replyToken: event.replyToken,
+            messages: [{ type: "text", text: "テキスト以外は対応していません🙏" }],
+          });
+        } catch (err: unknown) {
+          log(`[webhook] Reply error: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     }
