@@ -113,6 +113,16 @@ async function loadApp() {
     defaultHeaders: { "User-Agent": USER_AGENT },
   });
 
+  // グループ内でメンション判定するために Bot 自身の userId を取得
+  let botUserId = "";
+  try {
+    const botInfo = await messagingApiClient.getBotInfo();
+    botUserId = botInfo.userId;
+    log(`[boot] botUserId=${botUserId}`);
+  } catch (err: unknown) {
+    log(`[boot] getBotInfo failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   function createMCPServer() {
     const server = new McpServer({
       name: "line-bot",
@@ -163,11 +173,27 @@ async function loadApp() {
     const payload = JSON.parse(body.toString());
     for (const event of payload.events ?? []) {
       if (event.type === "message" && event.replyToken && event.message?.type === "text") {
+        // グループ/ルームの場合はメンションされた時だけ返信
+        const isGroupChat = event.source?.type === "group" || event.source?.type === "room";
+        const mentionees: Array<{ index: number; length: number; userId?: string }> =
+          event.message?.mention?.mentionees ?? [];
+        const isMentioned = mentionees.some((m) => m.userId === botUserId);
+        if (isGroupChat && !isMentioned) continue;
+
+        // メッセージからメンション部分（@Bot名）を除いてClaudeに渡す
+        let userText = event.message.text as string;
+        const sorted = [...mentionees].sort((a, b) => b.index - a.index);
+        for (const m of sorted) {
+          userText = userText.slice(0, m.index) + userText.slice(m.index + m.length);
+        }
+        userText = userText.trim();
+        if (!userText) continue;
+
         try {
           const aiResponse = await anthropic.messages.create({
             model: "claude-haiku-4-5",
             max_tokens: 1000,
-            messages: [{ role: "user", content: event.message.text as string }],
+            messages: [{ role: "user", content: userText }],
           });
           let replyText = "すみません、うまく応答できませんでした。";
           for (const block of aiResponse.content) {
