@@ -22,15 +22,15 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { createHmac } from "node:crypto";
 
-// Use console.log (stdout) so Render captures it regardless of log driver config
+// All logs use console.log (stdout) so Render captures them unconditionally.
 console.log(`[boot] Node.js ${process.version} started. PORT=${process.env.PORT ?? "(not set)"}, NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}`);
 
 process.on("uncaughtException", err => {
-  process.stderr.write(`[fatal] uncaughtException: ${err.message}\n${err.stack}\n`);
+  console.log(`[fatal] uncaughtException: ${err.message}\n${err.stack}`);
   process.exit(1);
 });
 process.on("unhandledRejection", reason => {
-  process.stderr.write(`[fatal] unhandledRejection: ${reason}\n`);
+  console.log(`[fatal] unhandledRejection: ${reason}`);
   process.exit(1);
 });
 
@@ -46,7 +46,7 @@ function getApp(): Promise<App> {
 }
 
 async function loadApp() {
-  process.stderr.write("[boot] Loading npm modules...\n");
+  console.log("[boot] Loading npm modules...");
 
   const [
     { McpServer },
@@ -86,7 +86,7 @@ async function loadApp() {
     import("./tools/getFollowerIds.js"),
   ]);
 
-  process.stderr.write("[boot] npm modules loaded OK\n");
+  console.log("[boot] npm modules loaded OK");
 
   const channelAccessToken = process.env.CHANNEL_ACCESS_TOKEN || "";
   const channelSecret = process.env.CHANNEL_SECRET || "";
@@ -175,100 +175,81 @@ async function loadApp() {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  process.stderr.write(
-    `[startup] CHANNEL_ACCESS_TOKEN=${process.env.CHANNEL_ACCESS_TOKEN ? "set" : "NOT SET"}\n`,
-  );
+  const port = parseInt(process.env.PORT || "10000");
+
+  console.log(`[startup] CHANNEL_ACCESS_TOKEN=${process.env.CHANNEL_ACCESS_TOKEN ? "set" : "NOT SET"}`);
+  console.log(`[startup] Binding HTTP server on 0.0.0.0:${port}...`);
+
+  const transports: Record<string, InstanceType<typeof import("@modelcontextprotocol/sdk/server/sse.js")["SSEServerTransport"]>> = {};
+
+  const httpServer = createServer((req, res) => {
+    (async () => {
+      if (req.method === "GET" && (req.url === "/" || req.url === "/health")) {
+        res.writeHead(200);
+        res.end("LINE Bot MCP Server is running");
+        return;
+      }
+
+      const app = await getApp();
+
+      if (req.method === "POST" && req.url === "/webhook") {
+        await app.handleWebhook(req, res);
+      } else if (req.method === "GET" && req.url === "/sse") {
+        const server = app.createMCPServer();
+        const transport = new app.SSEServerTransport("/message", res);
+        transports[transport.sessionId] = transport;
+        res.on("close", () => {
+          delete transports[transport.sessionId];
+        });
+        await server.connect(transport);
+      } else if (req.method === "POST" && req.url?.startsWith("/message")) {
+        const sessionId = new URL(req.url, "http://localhost").searchParams.get("sessionId");
+        if (sessionId && transports[sessionId]) {
+          await transports[sessionId].handlePostMessage(req, res);
+        } else {
+          res.writeHead(404);
+          res.end("Session not found");
+        }
+      } else {
+        res.writeHead(200);
+        res.end("LINE Bot MCP Server is running");
+      }
+    })().catch(err => {
+      console.log(`[request] Error: ${err.message}`);
+      if (!res.headersSent) {
+        res.writeHead(500);
+        res.end("Internal server error");
+      }
+    });
+  });
+
+  httpServer.on("error", err => {
+    console.log(`[startup] HTTP server error: ${err.message}`);
+    process.exit(1);
+  });
+
+  // Bind to 0.0.0.0 explicitly so Render's port scanner detects the port.
+  await new Promise<void>((resolve, reject) => {
+    httpServer.once("error", reject);
+    httpServer.listen(port, "0.0.0.0", () => {
+      httpServer.removeListener("error", reject);
+      resolve();
+    });
+  });
+
+  console.log(`[startup] HTTP server listening on 0.0.0.0:${port}`);
 
   if (!process.env.CHANNEL_ACCESS_TOKEN) {
-    process.stderr.write("[startup] WARNING: CHANNEL_ACCESS_TOKEN not set — MCP tools will fail at runtime\n");
+    console.log("[startup] WARNING: CHANNEL_ACCESS_TOKEN not set — MCP tools will fail at runtime");
   }
 
-  const port = process.env.PORT || "10000";
-
-  if (port) {
-    const transports: Record<string, InstanceType<typeof import("@modelcontextprotocol/sdk/server/sse.js")["SSEServerTransport"]>> = {};
-
-    // Start HTTP server FIRST — before any npm module loads.
-    // This makes Render's port scanner succeed immediately.
-    const httpServer = createServer((req, res) => {
-      (async () => {
-        // Health / root — always available, no npm modules needed
-        if (
-          req.method === "GET" &&
-          (req.url === "/" || req.url === "/health")
-        ) {
-          res.writeHead(200);
-          res.end("LINE Bot MCP Server is running");
-          return;
-        }
-
-        // All other routes need the full app
-        const app = await getApp();
-
-        if (req.method === "POST" && req.url === "/webhook") {
-          await app.handleWebhook(req, res);
-        } else if (req.method === "GET" && req.url === "/sse") {
-          const server = app.createMCPServer();
-          const transport = new app.SSEServerTransport("/message", res);
-          transports[transport.sessionId] = transport;
-          res.on("close", () => {
-            delete transports[transport.sessionId];
-          });
-          await server.connect(transport);
-        } else if (req.method === "POST" && req.url?.startsWith("/message")) {
-          const sessionId = new URL(
-            req.url,
-            "http://localhost",
-          ).searchParams.get("sessionId");
-          if (sessionId && transports[sessionId]) {
-            await transports[sessionId].handlePostMessage(req, res);
-          } else {
-            res.writeHead(404);
-            res.end("Session not found");
-          }
-        } else {
-          res.writeHead(200);
-          res.end("LINE Bot MCP Server is running");
-        }
-      })().catch(err => {
-        process.stderr.write(`[request] Error: ${err.message}\n`);
-        if (!res.headersSent) {
-          res.writeHead(500);
-          res.end("Internal server error");
-        }
-      });
-    });
-
-    httpServer.on("error", err => {
-      process.stderr.write(`[startup] HTTP server error: ${err.message}\n`);
-      process.exit(1);
-    });
-
-    httpServer.listen(parseInt(port), () => {
-      process.stderr.write(
-        `[startup] HTTP server listening on port ${port}\n`,
-      );
-    });
-
-    // Load npm modules in the background after the port is bound
-    getApp()
-      .then(() => process.stderr.write("[startup] Application ready\n"))
-      .catch(err =>
-        process.stderr.write(
-          `[startup] Module load failed: ${err.message}\n${err.stack}\n`,
-        ),
-      );
-  } else {
-    // Stdio mode (local CLI)
-    process.stderr.write("[startup] Stdio mode\n");
-    const app = await getApp();
-    const server = app.createMCPServer();
-    const transport = new app.StdioServerTransport();
-    await server.connect(transport);
-  }
+  // Load npm modules in the background after the port is bound.
+  getApp()
+    .then(() => console.log("[startup] Application ready"))
+    .catch(err => console.log(`[startup] Module load failed: ${err.message}\n${err.stack}`));
 }
 
 main().catch(err => {
-  process.stderr.write(`[fatal] main() failed: ${err.message}\n${err.stack}\n`);
+  console.log(`[fatal] main() failed: ${err.message}\n${err.stack}`);
   process.exit(1);
 });
