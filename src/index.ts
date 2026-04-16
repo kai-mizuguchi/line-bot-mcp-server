@@ -483,6 +483,19 @@ async function main() {
     getApp()
       .then(() => log("[startup] Application ready"))
       .catch(err => log(`[startup] Module load failed: ${err.message}\n${err.stack}`));
+
+    // Self-ping every 10 minutes to prevent Render free tier from spinning down
+    const selfUrl = `http://localhost:${port}/health`;
+    setInterval(() => {
+      import("node:http").then(({ request }) => {
+        const req = request(selfUrl, (res) => {
+          res.resume(); // drain response
+          log(`[keepalive] self-ping ${res.statusCode}`);
+        });
+        req.on("error", (err) => log(`[keepalive] self-ping error: ${err.message}`));
+        req.end();
+      });
+    }, 10 * 60 * 1000); // 10分
   });
 }
 
