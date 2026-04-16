@@ -16,22 +16,27 @@
  * under the License.
  */
 
-// Static imports: ONLY Node.js built-ins.
-// Third-party packages are loaded dynamically AFTER the HTTP server binds to
-// its port, so Render's port-detection succeeds even on slow/OOM starts.
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { createHmac } from "node:crypto";
 
-// All logs use console.log (stdout) so Render captures them unconditionally.
-console.log(`[boot] Node.js ${process.version} started. PORT=${process.env.PORT ?? "(not set)"}, NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}`);
+// Write to BOTH stdout and stderr so logs survive regardless of
+// how Render captures output. Never use process.exit() — use
+// process.exitCode so the event loop can drain and flush buffers.
+function log(msg: string): void {
+  const line = `${msg}\n`;
+  process.stdout.write(line);
+  process.stderr.write(line);
+}
 
-process.on("uncaughtException", err => {
-  console.log(`[fatal] uncaughtException: ${err.message}\n${err.stack}`);
-  process.exit(1);
+log(`[boot] Node.js ${process.version} PORT=${process.env.PORT ?? "(not set)"} NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}`);
+
+process.on("uncaughtException", (err: Error) => {
+  log(`[fatal] uncaughtException: ${err.message}\n${err.stack}`);
+  process.exitCode = 1;
 });
-process.on("unhandledRejection", reason => {
-  console.log(`[fatal] unhandledRejection: ${reason}`);
-  process.exit(1);
+process.on("unhandledRejection", (reason: unknown) => {
+  log(`[fatal] unhandledRejection: ${reason}`);
+  process.exitCode = 1;
 });
 
 // ---------------------------------------------------------------------------
@@ -46,7 +51,7 @@ function getApp(): Promise<App> {
 }
 
 async function loadApp() {
-  console.log("[boot] Loading npm modules...");
+  log("[boot] Loading npm modules...");
 
   const [
     { McpServer },
@@ -86,7 +91,7 @@ async function loadApp() {
     import("./tools/getFollowerIds.js"),
   ]);
 
-  console.log("[boot] npm modules loaded OK");
+  log("[boot] npm modules loaded OK");
 
   const channelAccessToken = process.env.CHANNEL_ACCESS_TOKEN || "";
   const channelSecret = process.env.CHANNEL_SECRET || "";
@@ -175,10 +180,10 @@ async function loadApp() {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const port = parseInt(process.env.PORT || "10000");
+  const port = parseInt(process.env.PORT ?? "10000");
 
-  console.log(`[startup] CHANNEL_ACCESS_TOKEN=${process.env.CHANNEL_ACCESS_TOKEN ? "set" : "NOT SET"}`);
-  console.log(`[startup] Binding HTTP server on 0.0.0.0:${port}...`);
+  log(`[startup] CHANNEL_ACCESS_TOKEN=${process.env.CHANNEL_ACCESS_TOKEN ? "set" : "NOT SET"}`);
+  log(`[startup] Calling httpServer.listen(${port})...`);
 
   const transports: Record<string, InstanceType<typeof import("@modelcontextprotocol/sdk/server/sse.js")["SSEServerTransport"]>> = {};
 
@@ -215,7 +220,7 @@ async function main() {
         res.end("LINE Bot MCP Server is running");
       }
     })().catch(err => {
-      console.log(`[request] Error: ${err.message}`);
+      log(`[request] Error: ${err.message}`);
       if (!res.headersSent) {
         res.writeHead(500);
         res.end("Internal server error");
@@ -223,33 +228,29 @@ async function main() {
     });
   });
 
-  httpServer.on("error", err => {
-    console.log(`[startup] HTTP server error: ${err.message}`);
-    process.exit(1);
+  // Do NOT call process.exit() in error handler — set exitCode and let the
+  // event loop drain so stdout/stderr buffers are flushed before exit.
+  httpServer.on("error", (err: NodeJS.ErrnoException) => {
+    log(`[startup] HTTP server error: ${err.code} ${err.message}`);
+    process.exitCode = 1;
   });
 
-  // Bind to 0.0.0.0 explicitly so Render's port scanner detects the port.
-  await new Promise<void>((resolve, reject) => {
-    httpServer.once("error", reject);
-    httpServer.listen(port, "0.0.0.0", () => {
-      httpServer.removeListener("error", reject);
-      resolve();
-    });
+  // Simple callback-based listen — no Promise/await wrapper that could
+  // interfere with error propagation.
+  httpServer.listen(port, () => {
+    log(`[startup] HTTP server listening on port ${port}`);
+
+    if (!process.env.CHANNEL_ACCESS_TOKEN) {
+      log("[startup] WARNING: CHANNEL_ACCESS_TOKEN not set — API calls will fail");
+    }
+
+    getApp()
+      .then(() => log("[startup] Application ready"))
+      .catch(err => log(`[startup] Module load failed: ${err.message}\n${err.stack}`));
   });
-
-  console.log(`[startup] HTTP server listening on 0.0.0.0:${port}`);
-
-  if (!process.env.CHANNEL_ACCESS_TOKEN) {
-    console.log("[startup] WARNING: CHANNEL_ACCESS_TOKEN not set — MCP tools will fail at runtime");
-  }
-
-  // Load npm modules in the background after the port is bound.
-  getApp()
-    .then(() => console.log("[startup] Application ready"))
-    .catch(err => console.log(`[startup] Module load failed: ${err.message}\n${err.stack}`));
 }
 
 main().catch(err => {
-  console.log(`[fatal] main() failed: ${err.message}\n${err.stack}`);
-  process.exit(1);
+  log(`[fatal] main() failed: ${err.message}\n${err.stack}`);
+  process.exitCode = 1;
 });
