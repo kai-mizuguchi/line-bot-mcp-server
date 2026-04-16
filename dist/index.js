@@ -41,7 +41,7 @@ function getApp() {
 }
 async function loadApp() {
     log("[boot] Loading npm modules...");
-    const [{ McpServer }, { SSEServerTransport }, { StdioServerTransport }, line, { LINE_BOT_MCP_SERVER_VERSION, USER_AGENT }, { default: CancelRichMenuDefault }, { default: PushTextMessage }, { default: PushFlexMessage }, { default: BroadcastTextMessage }, { default: BroadcastFlexMessage }, { default: GetProfile }, { default: GetMessageQuota }, { default: GetRichMenuList }, { default: DeleteRichMenu }, { default: SetRichMenuDefault }, { default: CreateRichMenu }, { default: GetFollowerIds },] = await Promise.all([
+    const [{ McpServer }, { SSEServerTransport }, { StdioServerTransport }, line, { LINE_BOT_MCP_SERVER_VERSION, USER_AGENT }, { default: CancelRichMenuDefault }, { default: PushTextMessage }, { default: PushFlexMessage }, { default: BroadcastTextMessage }, { default: BroadcastFlexMessage }, { default: GetProfile }, { default: GetMessageQuota }, { default: GetRichMenuList }, { default: DeleteRichMenu }, { default: SetRichMenuDefault }, { default: CreateRichMenu }, { default: GetFollowerIds }, { default: Anthropic },] = await Promise.all([
         import("@modelcontextprotocol/sdk/server/mcp.js"),
         import("@modelcontextprotocol/sdk/server/sse.js"),
         import("@modelcontextprotocol/sdk/server/stdio.js"),
@@ -59,12 +59,14 @@ async function loadApp() {
         import("./tools/setRichMenuDefault.js"),
         import("./tools/createRichMenu.js"),
         import("./tools/getFollowerIds.js"),
+        import("@anthropic-ai/sdk"),
     ]);
     log("[boot] npm modules loaded OK");
     const channelAccessToken = process.env.CHANNEL_ACCESS_TOKEN || "";
     const channelSecret = process.env.CHANNEL_SECRET || "";
     const destinationId = process.env.DESTINATION_USER_ID || "";
     const messagingApiBaseUrl = process.env.LINE_MESSAGING_API_BASE_URL;
+    const anthropic = new Anthropic();
     const messagingApiClient = new line.messagingApi.MessagingApiClient({
         channelAccessToken,
         baseURL: messagingApiBaseUrl,
@@ -114,11 +116,28 @@ async function loadApp() {
         res.end("OK");
         const payload = JSON.parse(body.toString());
         for (const event of payload.events ?? []) {
-            if (event.type === "message" && event.replyToken) {
-                await messagingApiClient.replyMessage({
-                    replyToken: event.replyToken,
-                    messages: [{ type: "text", text: "Claudeです！" }],
-                });
+            if (event.type === "message" && event.replyToken && event.message?.type === "text") {
+                try {
+                    const aiResponse = await anthropic.messages.create({
+                        model: "claude-opus-4-6",
+                        max_tokens: 1000,
+                        messages: [{ role: "user", content: event.message.text }],
+                    });
+                    let replyText = "すみません、うまく応答できませんでした。";
+                    for (const block of aiResponse.content) {
+                        if (block.type === "text") {
+                            replyText = block.text.slice(0, 5000);
+                            break;
+                        }
+                    }
+                    await messagingApiClient.replyMessage({
+                        replyToken: event.replyToken,
+                        messages: [{ type: "text", text: replyText }],
+                    });
+                }
+                catch (err) {
+                    log(`[webhook] Claude API error: ${err instanceof Error ? err.message : String(err)}`);
+                }
             }
         }
     }
@@ -135,6 +154,7 @@ async function loadApp() {
 async function main() {
     const port = parseInt(process.env.PORT ?? "10000");
     log(`[startup] CHANNEL_ACCESS_TOKEN=${process.env.CHANNEL_ACCESS_TOKEN ? "set" : "NOT SET"}`);
+    log(`[startup] ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY ? "set" : "NOT SET"}`);
     log(`[startup] Calling httpServer.listen(${port})...`);
     const transports = {};
     const httpServer = createServer((req, res) => {
