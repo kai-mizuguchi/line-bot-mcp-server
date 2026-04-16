@@ -100,6 +100,7 @@ async function loadApp() {
   const channelSecret = process.env.CHANNEL_SECRET || "";
   const destinationId = process.env.DESTINATION_USER_ID || "";
   const messagingApiBaseUrl = process.env.LINE_MESSAGING_API_BASE_URL;
+  const adminUserId = process.env.ADMIN_USER || "";
 
   const anthropic = new Anthropic();
 
@@ -111,6 +112,11 @@ async function loadApp() {
   } catch {
     log("[boot] WARNING: system-prompt.md not found — no system prompt");
   }
+
+  // 管理者向け：## Security セクションを除去したプロンプト（ロールハック対策なし）
+  const systemPromptAdmin = systemPrompt
+    .replace(/^## Security\n[\s\S]*?(?=^## )/m, "")
+    .trim();
 
   // Claude の返答から Markdown 記法を除去して LINE 向けプレーンテキストに変換
   function stripMarkdown(text: string): string {
@@ -131,8 +137,8 @@ async function loadApp() {
   const MAX_HISTORY = 20;
 
   // グループ内でメンション後に画像を待機するためのマップ
-  // key = historyKey, value = pendingになった時刻(ms)
-  const pendingImageState = new Map<string, number>();
+  // key = historyKey, value = { ts: 待機開始時刻(ms), context: ユーザーの指示テキスト }
+  const pendingImageState = new Map<string, { ts: number; context: string }>();
   const PENDING_IMAGE_TTL = 120_000; // 2分
 
   const messagingApiClient = new line.messagingApi.MessagingApiClient({
@@ -211,6 +217,7 @@ async function loadApp() {
       const mentionees: Array<{ index: number; length: number; userId?: string }> =
         event.message?.mention?.mentionees ?? [];
       const isMentioned = mentionees.some((m) => m.userId === botUserId);
+      const isAdmin = !!adminUserId && event.source?.userId === adminUserId;
       const historyKey = [
         event.source?.groupId,
         event.source?.roomId,
@@ -227,11 +234,13 @@ async function loadApp() {
         hour: "2-digit",
         minute: "2-digit",
       });
-      const systemWithDate = (systemPrompt ? systemPrompt + "\n\n" : "")
+      // 管理者は Security セクションなし、それ以外はフル system prompt
+      const basePrompt = isAdmin ? systemPromptAdmin : systemPrompt;
+      const systemWithDate = (basePrompt ? basePrompt + "\n\n" : "")
         + `Current date/time (JST): ${now}`;
 
       if (event.message?.type === "text") {
-        // グループ/ルームの場合はメンションされた時だけ返信
+        // グループ/ルームの場合はメンションされた時だけ返信（管理者も同様）
         if (isGroupChat && !isMentioned) continue;
 
         // メッセージからメンション部分（@Bot名）を除いてClaudeに渡す
@@ -268,8 +277,8 @@ async function loadApp() {
           }
           conversationHistory.set(historyKey, history);
 
-          // グループ内のメンション後に画像を2分間待機
-          pendingImageState.set(historyKey, Date.now());
+          // グループ内のメンション後に画像を2分間待機（指示テキストも保存）
+          pendingImageState.set(historyKey, { ts: Date.now(), context: userText });
 
           await messagingApiClient.replyMessage({
             replyToken: event.replyToken,
@@ -280,10 +289,12 @@ async function loadApp() {
         }
 
       } else if (event.message?.type === "image") {
+        let imagePrompt = "この画像について教えて";
         if (isGroupChat) {
           // グループ: メンション後2分以内の場合のみ処理
           const pending = pendingImageState.get(historyKey);
-          if (!pending || Date.now() - pending > PENDING_IMAGE_TTL) continue;
+          if (!pending || Date.now() - pending.ts > PENDING_IMAGE_TTL) continue;
+          imagePrompt = pending.context; // メンション時の指示をそのまま使う
           pendingImageState.delete(historyKey);
         }
 
@@ -296,6 +307,11 @@ async function loadApp() {
           const base64 = Buffer.concat(imgChunks).toString("base64");
 
           const history = conversationHistory.get(historyKey) ?? [];
+          // 1:1 の場合、直前のユーザー発言を指示として使う（ない場合はデフォルト）
+          if (!isGroupChat) {
+            const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
+            if (lastUserMsg) imagePrompt = lastUserMsg.content;
+          }
 
           const aiResponse = await anthropic.messages.create({
             model: "claude-haiku-4-5",
@@ -310,7 +326,7 @@ async function loadApp() {
                     type: "image",
                     source: { type: "base64", media_type: "image/jpeg", data: base64 },
                   },
-                  { type: "text", text: "この画像について教えて" },
+                  { type: "text", text: imagePrompt },
                 ],
               },
             ],
