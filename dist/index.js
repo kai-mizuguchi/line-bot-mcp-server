@@ -119,7 +119,7 @@ async function loadApp() {
             if (event.type === "message" && event.replyToken && event.message?.type === "text") {
                 try {
                     const aiResponse = await anthropic.messages.create({
-                        model: "claude-opus-4-6",
+                        model: "claude-haiku-4-5",
                         max_tokens: 1000,
                         messages: [{ role: "user", content: event.message.text }],
                     });
