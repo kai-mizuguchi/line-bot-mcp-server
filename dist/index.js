@@ -92,7 +92,7 @@ async function loadApp() {
     const conversationHistory = new Map();
     const MAX_HISTORY = 20;
     // グループ内でメンション後に画像を待機するためのマップ
-    // key = historyKey, value = pendingになった時刻(ms)
+    // key = historyKey, value = { ts: 待機開始時刻(ms), context: ユーザーの指示テキスト }
     const pendingImageState = new Map();
     const PENDING_IMAGE_TTL = 120_000; // 2分
     const messagingApiClient = new line.messagingApi.MessagingApiClient({
@@ -210,8 +210,8 @@ async function loadApp() {
                         history.splice(0, history.length - MAX_HISTORY);
                     }
                     conversationHistory.set(historyKey, history);
-                    // グループ内のメンション後に画像を2分間待機
-                    pendingImageState.set(historyKey, Date.now());
+                    // グループ内のメンション後に画像を2分間待機（指示テキストも保存）
+                    pendingImageState.set(historyKey, { ts: Date.now(), context: userText });
                     await messagingApiClient.replyMessage({
                         replyToken: event.replyToken,
                         messages: [{ type: "text", text: replyText }],
@@ -222,11 +222,13 @@ async function loadApp() {
                 }
             }
             else if (event.message?.type === "image") {
+                let imagePrompt = "この画像について教えて";
                 if (isGroupChat) {
                     // グループ: メンション後2分以内の場合のみ処理
                     const pending = pendingImageState.get(historyKey);
-                    if (!pending || Date.now() - pending > PENDING_IMAGE_TTL)
+                    if (!pending || Date.now() - pending.ts > PENDING_IMAGE_TTL)
                         continue;
+                    imagePrompt = pending.context; // メンション時の指示をそのまま使う
                     pendingImageState.delete(historyKey);
                 }
                 try {
@@ -237,6 +239,12 @@ async function loadApp() {
                     }
                     const base64 = Buffer.concat(imgChunks).toString("base64");
                     const history = conversationHistory.get(historyKey) ?? [];
+                    // 1:1 の場合、直前のユーザー発言を指示として使う（ない場合はデフォルト）
+                    if (!isGroupChat) {
+                        const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
+                        if (lastUserMsg)
+                            imagePrompt = lastUserMsg.content;
+                    }
                     const aiResponse = await anthropic.messages.create({
                         model: "claude-haiku-4-5",
                         max_tokens: 1000,
@@ -250,7 +258,7 @@ async function loadApp() {
                                         type: "image",
                                         source: { type: "base64", media_type: "image/jpeg", data: base64 },
                                     },
-                                    { type: "text", text: "この画像について教えて" },
+                                    { type: "text", text: imagePrompt },
                                 ],
                             },
                         ],
