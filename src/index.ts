@@ -335,12 +335,13 @@ async function loadApp() {
         }
 
       } else if (event.message?.type === "image") {
-        // 1:1 では画像を無視、グループのみメンション後2分以内に処理
-        if (!isGroupChat) continue;
-
-        const pending = pendingImageState.get(historyKey);
-        if (!pending || Date.now() - pending.ts > PENDING_IMAGE_TTL) continue;
-        const imagePrompt = pending.context;
+        // グループ: メンション後2分以内のみ処理、1:1: 常時処理
+        let imagePrompt = "この画像について教えて";
+        if (isGroupChat) {
+          const pending = pendingImageState.get(historyKey);
+          if (!pending || Date.now() - pending.ts > PENDING_IMAGE_TTL) continue;
+          imagePrompt = pending.context;
+        }
 
         try {
           const stream = await lineBlobClient.getMessageContent(event.message.id);
@@ -351,7 +352,12 @@ async function loadApp() {
           const base64 = Buffer.concat(imgChunks).toString("base64");
 
           const history = conversationHistory.get(historyKey) ?? [];
-          // 1:1 の場合、直前のユーザー発言を指示として使う（ない場合はデフォルト）
+          // 1:1 の場合、直前のユーザー発言を指示として使う
+          if (!isGroupChat) {
+            const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
+            if (lastUserMsg) imagePrompt = lastUserMsg.content;
+          }
+
           const aiResponse = await anthropic.messages.create({
             model: "claude-haiku-4-5",
             max_tokens: 1000,
