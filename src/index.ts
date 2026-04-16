@@ -113,9 +113,9 @@ async function loadApp() {
     log("[boot] WARNING: system-prompt.md not found — no system prompt");
   }
 
-  // 管理者向け：## Security セクションを除去したプロンプト（ロールハック対策なし）
+  // 管理者向け：## Security と ## Scope を除去（話題制限・ロールハック対策なし）
   const systemPromptAdmin = systemPrompt
-    .replace(/^## Security\n[\s\S]*?(?=^## )/m, "")
+    .replace(/^## (Security|Scope)\n[\s\S]*?(?=^## )/gm, "")
     .trim();
 
   // Claude の返答から Markdown 記法を除去して LINE 向けプレーンテキストに変換
