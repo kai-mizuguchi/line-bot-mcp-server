@@ -16,6 +16,7 @@
  */
 import { createServer } from "node:http";
 import { createHmac } from "node:crypto";
+import { readFileSync } from "node:fs";
 // Write to BOTH stdout and stderr so logs survive regardless of
 // how Render captures output. Never use process.exit() — use
 // process.exitCode so the event loop can drain and flush buffers.
@@ -67,6 +68,17 @@ async function loadApp() {
     const destinationId = process.env.DESTINATION_USER_ID || "";
     const messagingApiBaseUrl = process.env.LINE_MESSAGING_API_BASE_URL;
     const anthropic = new Anthropic();
+    // system-prompt.md をサーバー起動時に読み込む
+    let systemPrompt = "";
+    try {
+        systemPrompt = readFileSync("system-prompt.md", "utf-8");
+        log("[boot] system-prompt.md loaded OK");
+    }
+    catch {
+        log("[boot] WARNING: system-prompt.md not found — no system prompt");
+    }
+    const conversationHistory = new Map();
+    const MAX_HISTORY = 20;
     const messagingApiClient = new line.messagingApi.MessagingApiClient({
         channelAccessToken,
         baseURL: messagingApiBaseUrl,
@@ -143,10 +155,19 @@ async function loadApp() {
                 if (!userText)
                     continue;
                 try {
+                    // ユーザーIDで会話履歴を管理（グループではgroupId+userId）
+                    const historyKey = [
+                        event.source?.groupId,
+                        event.source?.roomId,
+                        event.source?.userId,
+                    ].filter(Boolean).join(":");
+                    const history = conversationHistory.get(historyKey) ?? [];
+                    history.push({ role: "user", content: userText });
                     const aiResponse = await anthropic.messages.create({
                         model: "claude-haiku-4-5",
                         max_tokens: 1000,
-                        messages: [{ role: "user", content: userText }],
+                        system: systemPrompt || undefined,
+                        messages: history,
                     });
                     let replyText = "すみません、うまく応答できませんでした。";
                     for (const block of aiResponse.content) {
@@ -155,6 +176,12 @@ async function loadApp() {
                             break;
                         }
                     }
+                    history.push({ role: "assistant", content: replyText });
+                    // 古い履歴を削除してメモリを節約
+                    if (history.length > MAX_HISTORY) {
+                        history.splice(0, history.length - MAX_HISTORY);
+                    }
+                    conversationHistory.set(historyKey, history);
                     await messagingApiClient.replyMessage({
                         replyToken: event.replyToken,
                         messages: [{ type: "text", text: replyText }],
