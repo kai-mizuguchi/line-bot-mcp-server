@@ -252,6 +252,18 @@ async function loadApp() {
         userText = userText.trim();
         if (!userText) continue;
 
+        // /myid コマンド：送信者の userId をそのまま返す
+        if (userText === "/myid") {
+          const userId = event.source?.userId ?? "(不明)";
+          await messagingApiClient.replyMessage({
+            replyToken: event.replyToken,
+            messages: [{ type: "text", text: `あなたのLINE IDは ${userId} です` }],
+          }).catch((err: unknown) => {
+            log(`[webhook] /myid reply error: ${err instanceof Error ? err.message : String(err)}`);
+          });
+          continue;
+        }
+
         try {
           const history = conversationHistory.get(historyKey) ?? [];
           history.push({ role: "user", content: userText });
