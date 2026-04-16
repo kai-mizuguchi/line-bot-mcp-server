@@ -112,6 +112,19 @@ async function loadApp() {
     log("[boot] WARNING: system-prompt.md not found — no system prompt");
   }
 
+  // Claude の返答から Markdown 記法を除去して LINE 向けプレーンテキストに変換
+  function stripMarkdown(text: string): string {
+    return text
+      .replace(/\*\*(.*?)\*\*/g, "$1")           // **bold** → bold
+      .replace(/\*(.*?)\*/g, "$1")               // *italic* → italic
+      .replace(/^#{1,6}\s+/gm, "")              // ## heading → plain
+      .replace(/^[\-\*\+]\s+/gm, "・")          // - list → ・
+      .replace(/`{1,3}[^`\n]*`{1,3}/g, "")      // `code` → 削除
+      .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1") // [text](url) → text
+      .replace(/\n{3,}/g, "\n\n")               // 連続空行を2行に
+      .trim();
+  }
+
   // ユーザーごとの会話履歴（複数ターンで情報を集めるため）
   type Message = { role: "user" | "assistant"; content: string };
   const conversationHistory = new Map<string, Message[]>();
@@ -225,7 +238,7 @@ async function loadApp() {
           let replyText = "すみません、うまく応答できませんでした。";
           for (const block of aiResponse.content) {
             if (block.type === "text") {
-              replyText = block.text.slice(0, 5000);
+              replyText = stripMarkdown(block.text).slice(0, 5000);
               break;
             }
           }
