@@ -208,6 +208,18 @@ async function loadApp() {
                     });
                     continue;
                 }
+                // /reset コマンド：会話履歴をクリア
+                if (userText === "/reset") {
+                    conversationHistory.delete(historyKey);
+                    pendingImageState.delete(historyKey);
+                    await messagingApiClient.replyMessage({
+                        replyToken: event.replyToken,
+                        messages: [{ type: "text", text: "会話履歴をリセットしました✅" }],
+                    }).catch((err) => {
+                        log(`[webhook] /reset reply error: ${err instanceof Error ? err.message : String(err)}`);
+                    });
+                    continue;
+                }
                 try {
                     const history = conversationHistory.get(historyKey) ?? [];
                     history.push({ role: "user", content: userText });
@@ -238,17 +250,20 @@ async function loadApp() {
                 }
                 catch (err) {
                     log(`[webhook] Claude API error: ${err instanceof Error ? err.message : String(err)}`);
+                    await messagingApiClient.replyMessage({
+                        replyToken: event.replyToken,
+                        messages: [{ type: "text", text: "ちょっと調子が悪いみたい😵 少し待ってから再送してね🙏" }],
+                    }).catch(() => { });
                 }
             }
             else if (event.message?.type === "image") {
                 let imagePrompt = "この画像について教えて";
                 if (isGroupChat) {
-                    // グループ: メンション後2分以内の場合のみ処理
+                    // グループ: メンション後2分以内の場合のみ処理（複数枚送信のため状態は維持）
                     const pending = pendingImageState.get(historyKey);
                     if (!pending || Date.now() - pending.ts > PENDING_IMAGE_TTL)
                         continue;
                     imagePrompt = pending.context; // メンション時の指示をそのまま使う
-                    pendingImageState.delete(historyKey);
                 }
                 try {
                     const stream = await lineBlobClient.getMessageContent(event.message.id);
@@ -302,6 +317,10 @@ async function loadApp() {
                 }
                 catch (err) {
                     log(`[webhook] Vision error: ${err instanceof Error ? err.message : String(err)}`);
+                    await messagingApiClient.replyMessage({
+                        replyToken: event.replyToken,
+                        messages: [{ type: "text", text: "画像の処理中にエラーが起きたよ😵 少し待ってから再送してね🙏" }],
+                    }).catch(() => { });
                 }
             }
             else {
