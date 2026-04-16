@@ -38,6 +38,7 @@
   "homepage": "https://github.com/line/line-bot-mcp-server",
   "bugs": "https://github.com/line/line-bot-mcp-server/issues",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.50.4",
     "@line/bot-sdk": "^11.0.0",
     "@marp-team/marp-core": "^4.1.0",
     "@modelcontextprotocol/sdk": "^1.8.0",
