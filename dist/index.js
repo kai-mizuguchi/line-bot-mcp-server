@@ -95,7 +95,38 @@ async function loadApp() {
             .trim();
     }
     const conversationHistory = new Map();
-    const MAX_HISTORY = 20;
+    const lastActiveMap = new Map(); // TTL管理用
+    const MAX_HISTORY = 10;
+    const HISTORY_TTL = 24 * 60 * 60 * 1000; // 24時間
+    // 履歴がMAX_HISTORYに達したら古い半分をClaudeで要約して圧縮
+    async function compressHistory(history) {
+        if (history.length < MAX_HISTORY)
+            return;
+        const half = Math.floor(MAX_HISTORY / 2);
+        const toSummarize = history.splice(0, half);
+        try {
+            const res = await anthropic.messages.create({
+                model: "claude-haiku-4-5",
+                max_tokens: 150,
+                messages: [
+                    ...toSummarize,
+                    { role: "user", content: "Summarize the above conversation in 1-2 short sentences in Japanese." },
+                ],
+            });
+            let summary = "";
+            for (const block of res.content) {
+                if (block.type === "text") {
+                    summary = block.text;
+                    break;
+                }
+            }
+            if (summary)
+                history.unshift({ role: "user", content: `[以前の会話の要約: ${summary}]` });
+        }
+        catch {
+            // 要約失敗時は古い分はsplice済みのままで続行
+        }
+    }
     // グループ内でメンション後に画像を待機するためのマップ
     // key = historyKey, value = { ts: 待機開始時刻(ms), context: ユーザーの指示テキスト }
     const pendingImageState = new Map();
@@ -227,6 +258,7 @@ async function loadApp() {
                 // /reset コマンド：会話履歴をクリア
                 if (userText === "/reset") {
                     conversationHistory.delete(historyKey);
+                    lastActiveMap.delete(historyKey);
                     pendingImageState.delete(historyKey);
                     await messagingApiClient.replyMessage({
                         replyToken: event.replyToken,
@@ -239,6 +271,7 @@ async function loadApp() {
                 try {
                     const history = conversationHistory.get(historyKey) ?? [];
                     history.push({ role: "user", content: userText });
+                    await compressHistory(history);
                     const aiResponse = await anthropic.messages.create({
                         model: "claude-haiku-4-5",
                         max_tokens: 1000,
@@ -253,10 +286,8 @@ async function loadApp() {
                         }
                     }
                     history.push({ role: "assistant", content: replyText });
-                    if (history.length > MAX_HISTORY) {
-                        history.splice(0, history.length - MAX_HISTORY);
-                    }
                     conversationHistory.set(historyKey, history);
+                    lastActiveMap.set(historyKey, Date.now());
                     // グループ内のメンション後に画像を2分間待機（指示テキストも保存）
                     pendingImageState.set(historyKey, { ts: Date.now(), context: userText });
                     await messagingApiClient.replyMessage({
@@ -322,10 +353,8 @@ async function loadApp() {
                     }
                     history.push({ role: "user", content: "[画像]" });
                     history.push({ role: "assistant", content: replyText });
-                    if (history.length > MAX_HISTORY) {
-                        history.splice(0, history.length - MAX_HISTORY);
-                    }
                     conversationHistory.set(historyKey, history);
+                    lastActiveMap.set(historyKey, Date.now());
                     await messagingApiClient.replyMessage({
                         replyToken: event.replyToken,
                         messages: [{ type: "text", text: replyText }],
@@ -355,6 +384,20 @@ async function loadApp() {
             }
         }
     }
+    // 24時間非アクティブなユーザーの履歴を削除（1時間ごとにチェック）
+    setInterval(() => {
+        const now = Date.now();
+        let count = 0;
+        for (const [key, lastActive] of lastActiveMap) {
+            if (now - lastActive > HISTORY_TTL) {
+                conversationHistory.delete(key);
+                lastActiveMap.delete(key);
+                count++;
+            }
+        }
+        if (count > 0)
+            log(`[history] Expired ${count} inactive conversation(s)`);
+    }, 60 * 60 * 1000); // 1時間ごと
     return {
         createMCPServer,
         handleWebhook,
