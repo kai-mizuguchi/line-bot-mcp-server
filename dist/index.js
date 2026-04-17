@@ -124,10 +124,12 @@ async function loadApp() {
         // 日本語フォントを探して登録（見つからなければシステムデフォルトで続行）
         const jpFontPaths = [
             process.env.FONT_PATH,
+            "assets/ipag.ttf", // バンドル済み IPA Gothic
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
             "/usr/share/fonts/truetype/noto/NotoSansCJKjp-Regular.otf",
             "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf",
         ].filter(Boolean);
         let fontFamily = "sans-serif";
         for (const p of jpFontPaths) {
