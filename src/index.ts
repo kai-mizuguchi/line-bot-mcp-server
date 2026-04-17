@@ -131,10 +131,14 @@ async function loadApp() {
       .trim();
   }
 
-  // SETLIST_IMAGE ブロックをパース
+  // SETLIST_IMAGE ブロックをパース（テキスト中のどこにあっても検出）
   function parseSetlistData(text: string): { title: string; date: string; songs: string[] } | null {
-    if (!text.trim().startsWith("SETLIST_IMAGE")) return null;
-    const lines = text.split("\n").map((l) => l.trim());
+    const start = text.indexOf("SETLIST_IMAGE");
+    if (start === -1) return null;
+    const end = text.indexOf("END_SETLIST", start);
+    if (end === -1) return null;
+    const block = text.slice(start, end + "END_SETLIST".length);
+    const lines = block.split("\n").map((l) => l.trim());
     let title = "セットリスト", date = "";
     const songs: string[] = [];
     for (const line of lines) {
@@ -181,7 +185,14 @@ async function loadApp() {
     const pageHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body,html{margin:0;padding:0}${css}</style></head><body>${html}</body></html>`;
 
     const browser = await puppeteer.launch({
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-zygote",
+        "--single-process",
+      ],
     });
     try {
       const page = await browser.newPage();
