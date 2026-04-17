@@ -18,7 +18,7 @@
 
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { createHmac } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 
 // Write to BOTH stdout and stderr so logs survive regardless of
 // how Render captures output. Never use process.exit() — use
@@ -129,6 +129,78 @@ async function loadApp() {
       .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1") // [text](url) → text
       .replace(/\n{3,}/g, "\n\n")               // 連続空行を2行に
       .trim();
+  }
+
+  // SETLIST_IMAGE ブロックをパース
+  function parseSetlistData(text: string): { title: string; date: string; songs: string[] } | null {
+    if (!text.trim().startsWith("SETLIST_IMAGE")) return null;
+    const lines = text.split("\n").map((l) => l.trim());
+    let title = "セットリスト", date = "";
+    const songs: string[] = [];
+    for (const line of lines) {
+      if (!line || line === "SETLIST_IMAGE" || line === "END_SETLIST") continue;
+      if (line.startsWith("title:")) title = line.slice(6).trim() || title;
+      else if (line.startsWith("date:")) date = line.slice(5).trim();
+      else if (/^\d+\.\s/.test(line)) songs.push(line.replace(/^\d+\.\s+/, ""));
+    }
+    return songs.length > 0 ? { title, date, songs } : null;
+  }
+
+  // Marp + Puppeteer でセトリ画像を生成して /tmp に保存
+  async function generateSetlistImage(title: string, date: string, songs: string[]): Promise<string> {
+    const { Marp } = await import("@marp-team/marp-core");
+    const puppeteer = await import("puppeteer");
+
+    const songLines = songs.map((s, i) => `${i + 1}. ${s}`).join("\n");
+    const markdown = [
+      "---",
+      "marp: true",
+      "style: |",
+      "  section {",
+      "    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);",
+      "    color: #eee;",
+      "    font-family: 'Hiragino Sans', 'Noto Sans JP', sans-serif;",
+      "    padding: 60px 80px;",
+      "    display: flex;",
+      "    flex-direction: column;",
+      "    justify-content: center;",
+      "  }",
+      "  h1 { color: #ff6b6b; font-size: 1.8em; margin-bottom: 0.1em; }",
+      "  h2 { color: #888; font-size: 0.85em; margin-top: 0; margin-bottom: 1.2em; font-weight: normal; }",
+      "  p { font-size: 1.3em; line-height: 1.9; white-space: pre-line; }",
+      "---",
+      "",
+      `# 🎸 ${title}`,
+      date ? `## ${date}` : "",
+      "",
+      songLines,
+    ].join("\n");
+
+    const marp = new Marp();
+    const { html, css } = marp.render(markdown);
+    const pageHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body,html{margin:0;padding:0}${css}</style></head><body>${html}</body></html>`;
+
+    const browser = await puppeteer.launch({
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    });
+    try {
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 2 });
+      await page.setContent(pageHtml, { waitUntil: "networkidle0" });
+      const section = await page.$("section");
+      const filename = `setlist-${Date.now()}.png`;
+      const filepath = `/tmp/${filename}`;
+      if (section) {
+        await (section as unknown as { screenshot(o: object): Promise<void> }).screenshot({ path: filepath });
+      } else {
+        await page.screenshot({ path: filepath });
+      }
+      // 10分後に削除
+      setTimeout(() => { try { unlinkSync(filepath); } catch { /* ignore */ } }, 10 * 60 * 1000);
+      return filename;
+    } finally {
+      await browser.close();
+    }
   }
 
   // ユーザーごとの会話履歴（複数ターンで情報を集めるため）
@@ -333,25 +405,48 @@ async function loadApp() {
             messages: history,
           });
 
-          let replyText = "すみません、うまく応答できませんでした。";
+          let rawReplyText = "";
           for (const block of aiResponse.content) {
-            if (block.type === "text") {
-              replyText = stripMarkdown(block.text).slice(0, 5000);
-              break;
-            }
+            if (block.type === "text") { rawReplyText = block.text; break; }
           }
 
-          history.push({ role: "assistant", content: replyText });
-          conversationHistory.set(historyKey, history);
-          lastActiveMap.set(historyKey, Date.now());
-
-          // グループ内のメンション後に画像を2分間待機（指示テキストも保存）
           pendingImageState.set(historyKey, { ts: Date.now(), context: userText });
 
-          await messagingApiClient.replyMessage({
-            replyToken: event.replyToken,
-            messages: [{ type: "text", text: replyText }],
-          });
+          const setlistData = parseSetlistData(rawReplyText);
+          if (setlistData) {
+            // セトリ画像を生成して送信
+            try {
+              const filename = await generateSetlistImage(setlistData.title, setlistData.date, setlistData.songs);
+              const serviceUrl = process.env.RENDER_EXTERNAL_URL ?? `http://localhost:${process.env.PORT ?? "10000"}`;
+              const imageUrl = `${serviceUrl}/tmp/${filename}`;
+              history.push({ role: "assistant", content: `[セトリ画像: ${setlistData.title}]` });
+              conversationHistory.set(historyKey, history);
+              lastActiveMap.set(historyKey, Date.now());
+              await messagingApiClient.replyMessage({
+                replyToken: event.replyToken,
+                messages: [{ type: "image", originalContentUrl: imageUrl, previewImageUrl: imageUrl }],
+              });
+            } catch (imgErr: unknown) {
+              log(`[webhook] Setlist image error: ${imgErr instanceof Error ? imgErr.message : String(imgErr)}`);
+              const fallback = `🎸 ${setlistData.title}${setlistData.date ? "\n" + setlistData.date : ""}\n\n` + setlistData.songs.map((s, i) => `${i + 1}. ${s}`).join("\n");
+              history.push({ role: "assistant", content: fallback });
+              conversationHistory.set(historyKey, history);
+              lastActiveMap.set(historyKey, Date.now());
+              await messagingApiClient.replyMessage({
+                replyToken: event.replyToken,
+                messages: [{ type: "text", text: fallback }],
+              });
+            }
+          } else {
+            const replyText = stripMarkdown(rawReplyText || "すみません、うまく応答できませんでした。").slice(0, 5000);
+            history.push({ role: "assistant", content: replyText });
+            conversationHistory.set(historyKey, history);
+            lastActiveMap.set(historyKey, Date.now());
+            await messagingApiClient.replyMessage({
+              replyToken: event.replyToken,
+              messages: [{ type: "text", text: replyText }],
+            });
+          }
         } catch (err: unknown) {
           log(`[webhook] Claude API error: ${err instanceof Error ? err.message : String(err)}`);
           await messagingApiClient.replyMessage({
@@ -483,6 +578,25 @@ async function main() {
       if (req.method === "GET" && (req.url === "/" || req.url === "/health")) {
         res.writeHead(200);
         res.end("LINE Bot MCP Server is running");
+        return;
+      }
+
+      // セトリ画像の配信 (/tmp/setlist-*.png)
+      if (req.method === "GET" && req.url?.startsWith("/tmp/")) {
+        const filename = req.url.slice(5);
+        if (!/^setlist-\d+\.png$/.test(filename)) {
+          res.writeHead(404);
+          res.end("Not found");
+          return;
+        }
+        try {
+          const data = readFileSync(`/tmp/${filename}`);
+          res.writeHead(200, { "Content-Type": "image/png" });
+          res.end(data);
+        } catch {
+          res.writeHead(404);
+          res.end("Not found");
+        }
         return;
       }
 
