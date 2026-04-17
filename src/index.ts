@@ -18,7 +18,7 @@
 
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { createHmac } from "node:crypto";
-import { readFileSync, unlinkSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync, existsSync } from "node:fs";
 
 // Write to BOTH stdout and stderr so logs survive regardless of
 // how Render captures output. Never use process.exit() — use
@@ -150,68 +150,85 @@ async function loadApp() {
     return songs.length > 0 ? { title, date, songs } : null;
   }
 
-  // Marp + Puppeteer でセトリ画像を生成して /tmp に保存
+  // @napi-rs/canvas でセトリ画像を生成して /tmp に保存（Chrome不要）
   async function generateSetlistImage(title: string, date: string, songs: string[]): Promise<string> {
-    const { Marp } = await import("@marp-team/marp-core");
-    const puppeteer = await import("puppeteer");
+    const { createCanvas, GlobalFonts } = await import("@napi-rs/canvas");
 
-    const songLines = songs.map((s, i) => `${i + 1}. ${s}`).join("\n");
-    const markdown = [
-      "---",
-      "marp: true",
-      "style: |",
-      "  section {",
-      "    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);",
-      "    color: #eee;",
-      "    font-family: 'Hiragino Sans', 'Noto Sans JP', sans-serif;",
-      "    padding: 60px 80px;",
-      "    display: flex;",
-      "    flex-direction: column;",
-      "    justify-content: center;",
-      "  }",
-      "  h1 { color: #ff6b6b; font-size: 1.8em; margin-bottom: 0.1em; }",
-      "  h2 { color: #888; font-size: 0.85em; margin-top: 0; margin-bottom: 1.2em; font-weight: normal; }",
-      "  p { font-size: 1.3em; line-height: 1.9; white-space: pre-line; }",
-      "---",
-      "",
-      `# 🎸 ${title}`,
-      date ? `## ${date}` : "",
-      "",
-      songLines,
-    ].join("\n");
-
-    const marp = new Marp();
-    const { html, css } = marp.render(markdown);
-    const pageHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body,html{margin:0;padding:0}${css}</style></head><body>${html}</body></html>`;
-
-    const browser = await puppeteer.launch({
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-zygote",
-        "--single-process",
-      ],
-    });
-    try {
-      const page = await browser.newPage();
-      await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 2 });
-      await page.setContent(pageHtml, { waitUntil: "networkidle0" });
-      const section = await page.$("section");
-      const filename = `setlist-${Date.now()}.png`;
-      const filepath = `/tmp/${filename}`;
-      if (section) {
-        await (section as unknown as { screenshot(o: object): Promise<void> }).screenshot({ path: filepath });
-      } else {
-        await page.screenshot({ path: filepath });
+    // 日本語フォントを探して登録（見つからなければシステムデフォルトで続行）
+    const jpFontPaths = [
+      process.env.FONT_PATH,
+      "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+      "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+      "/usr/share/fonts/truetype/noto/NotoSansCJKjp-Regular.otf",
+      "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    ].filter(Boolean) as string[];
+    let fontFamily = "sans-serif";
+    for (const p of jpFontPaths) {
+      if (existsSync(p)) {
+        try {
+          GlobalFonts.registerFromPath(p, "JpFont");
+          fontFamily = "JpFont";
+          log(`[setlist] font: ${p}`);
+        } catch { /* ignore */ }
+        break;
       }
-      // 10分後に削除
-      setTimeout(() => { try { unlinkSync(filepath); } catch { /* ignore */ } }, 10 * 60 * 1000);
-      return filename;
-    } finally {
-      await browser.close();
     }
+
+    const W = 1280, H = 720;
+    const canvas = createCanvas(W, H);
+    const ctx = canvas.getContext("2d");
+
+    // 背景グラデーション
+    const grad = ctx.createLinearGradient(0, 0, W, H);
+    grad.addColorStop(0, "#1a1a2e");
+    grad.addColorStop(1, "#16213e");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    // アクセントライン
+    ctx.fillStyle = "#ff6b6b";
+    ctx.fillRect(80, 32, 180, 4);
+
+    // タイトル
+    ctx.fillStyle = "#ff6b6b";
+    ctx.font = `bold 54px "${fontFamily}", sans-serif`;
+    ctx.fillText(`♪ ${title || "セットリスト"}`, 80, 115);
+
+    // 日付
+    let startY = 178;
+    if (date) {
+      ctx.fillStyle = "#888888";
+      ctx.font = `28px "${fontFamily}", sans-serif`;
+      ctx.fillText(date, 84, 158);
+      startY = 210;
+    }
+
+    // 区切り線
+    ctx.strokeStyle = "#2a2a5a";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(80, startY - 8);
+    ctx.lineTo(W - 80, startY - 8);
+    ctx.stroke();
+
+    // 曲リスト
+    const lineHeight = Math.min(64, Math.floor((H - startY - 40) / Math.max(songs.length, 1)));
+    const fontSize = Math.min(36, Math.floor(lineHeight * 0.72));
+    songs.forEach((song, i) => {
+      const y = startY + i * lineHeight + fontSize;
+      ctx.fillStyle = "#ff6b6b";
+      ctx.font = `bold ${fontSize}px "${fontFamily}", sans-serif`;
+      ctx.fillText(`${i + 1}.`, 80, y);
+      ctx.fillStyle = "#eeeeee";
+      ctx.font = `${fontSize}px "${fontFamily}", sans-serif`;
+      ctx.fillText(song, 80 + fontSize * 2.2, y);
+    });
+
+    const filename = `setlist-${Date.now()}.png`;
+    const filepath = `/tmp/${filename}`;
+    writeFileSync(filepath, canvas.toBuffer("image/png"));
+    setTimeout(() => { try { unlinkSync(filepath); } catch { /* ignore */ } }, 10 * 60 * 1000);
+    return filename;
   }
 
   // ユーザーごとの会話履歴（複数ターンで情報を集めるため）
