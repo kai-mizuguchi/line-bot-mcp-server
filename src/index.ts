@@ -132,27 +132,37 @@ async function loadApp() {
   }
 
   // SETLIST_IMAGE ブロックをパース（テキスト中のどこにあっても検出）
-  function parseSetlistData(text: string): { title: string; date: string; songs: string[] } | null {
+  function parseSetlistData(text: string): { theme: string; title: string; date: string; songs: string[] } | null {
     const start = text.indexOf("SETLIST_IMAGE");
     if (start === -1) return null;
     const end = text.indexOf("END_SETLIST", start);
     if (end === -1) return null;
     const block = text.slice(start, end + "END_SETLIST".length);
     const lines = block.split("\n").map((l) => l.trim());
-    let title = "セットリスト", date = "";
+    let theme = "dark", title = "セットリスト", date = "";
     const songs: string[] = [];
     for (const line of lines) {
       if (!line || line === "SETLIST_IMAGE" || line === "END_SETLIST") continue;
-      if (line.startsWith("title:")) title = line.slice(6).trim() || title;
+      if (line.startsWith("theme:")) theme = line.slice(6).trim() || theme;
+      else if (line.startsWith("title:")) title = line.slice(6).trim() || title;
       else if (line.startsWith("date:")) date = line.slice(5).trim();
       else if (/^\d+\.\s/.test(line)) songs.push(line.replace(/^\d+\.\s+/, ""));
     }
-    return songs.length > 0 ? { title, date, songs } : null;
+    return songs.length > 0 ? { theme, title, date, songs } : null;
   }
 
+  type SetlistTheme = { bg: [string, string]; title: string; date: string; num: string; song: string; accent: string; divider: string };
+  const THEMES: Record<string, SetlistTheme> = {
+    dark:    { bg: ["#1a1a2e", "#16213e"], title: "#ff6b6b", date: "#888888", num: "#ff6b6b", song: "#eeeeee", accent: "#ff6b6b", divider: "#2a2a5a" },
+    light:   { bg: ["#f4f4f4", "#ffffff"], title: "#333333", date: "#888888", num: "#e05555", song: "#333333", accent: "#e05555", divider: "#dddddd" },
+    neon:    { bg: ["#000000", "#0d0d0d"], title: "#ff2df7", date: "#888888", num: "#ff2df7", song: "#00f0c0", accent: "#ff2df7", divider: "#222222" },
+    vintage: { bg: ["#f5e6c8", "#edd9a3"], title: "#7a3b1e", date: "#9a7040", num: "#7a3b1e", song: "#3e2612", accent: "#7a3b1e", divider: "#c4a06a" },
+  };
+
   // @napi-rs/canvas でセトリ画像を生成して /tmp に保存（Chrome不要）
-  async function generateSetlistImage(title: string, date: string, songs: string[]): Promise<string> {
+  async function generateSetlistImage(theme: string, title: string, date: string, songs: string[]): Promise<string> {
     const { createCanvas, GlobalFonts } = await import("@napi-rs/canvas");
+    const t = THEMES[theme] ?? THEMES["dark"];
 
     // 日本語フォントを探して登録（見つからなければシステムデフォルトで続行）
     const jpFontPaths = [
@@ -182,31 +192,31 @@ async function loadApp() {
 
     // 背景グラデーション
     const grad = ctx.createLinearGradient(0, 0, W, H);
-    grad.addColorStop(0, "#1a1a2e");
-    grad.addColorStop(1, "#16213e");
+    grad.addColorStop(0, t.bg[0]);
+    grad.addColorStop(1, t.bg[1]);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, W, H);
 
     // アクセントライン
-    ctx.fillStyle = "#ff6b6b";
+    ctx.fillStyle = t.accent;
     ctx.fillRect(80, 32, 180, 4);
 
     // タイトル
-    ctx.fillStyle = "#ff6b6b";
+    ctx.fillStyle = t.title;
     ctx.font = `bold 54px "${fontFamily}", sans-serif`;
     ctx.fillText(`♪ ${title || "セットリスト"}`, 80, 115);
 
     // 日付
     let startY = 178;
     if (date) {
-      ctx.fillStyle = "#888888";
+      ctx.fillStyle = t.date;
       ctx.font = `28px "${fontFamily}", sans-serif`;
       ctx.fillText(date, 84, 158);
       startY = 210;
     }
 
     // 区切り線
-    ctx.strokeStyle = "#2a2a5a";
+    ctx.strokeStyle = t.divider;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(80, startY - 8);
@@ -218,10 +228,10 @@ async function loadApp() {
     const fontSize = Math.min(36, Math.floor(lineHeight * 0.72));
     songs.forEach((song, i) => {
       const y = startY + i * lineHeight + fontSize;
-      ctx.fillStyle = "#ff6b6b";
+      ctx.fillStyle = t.num;
       ctx.font = `bold ${fontSize}px "${fontFamily}", sans-serif`;
       ctx.fillText(`${i + 1}.`, 80, y);
-      ctx.fillStyle = "#eeeeee";
+      ctx.fillStyle = t.song;
       ctx.font = `${fontSize}px "${fontFamily}", sans-serif`;
       ctx.fillText(song, 80 + fontSize * 2.2, y);
     });
@@ -446,7 +456,7 @@ async function loadApp() {
           if (setlistData) {
             // セトリ画像を生成して送信
             try {
-              const filename = await generateSetlistImage(setlistData.title, setlistData.date, setlistData.songs);
+              const filename = await generateSetlistImage(setlistData.theme, setlistData.title, setlistData.date, setlistData.songs);
               const serviceUrl = process.env.RENDER_EXTERNAL_URL ?? `http://localhost:${process.env.PORT ?? "10000"}`;
               const imageUrl = `${serviceUrl}/tmp/${filename}`;
               history.push({ role: "assistant", content: `[セトリ画像: ${setlistData.title}]` });
