@@ -631,7 +631,10 @@ async function main() {
             .then(() => log("[startup] Application ready"))
             .catch(err => log(`[startup] Module load failed: ${err.message}\n${err.stack}`));
         // Self-ping every 10 minutes to prevent Render free tier from spinning down
-        const selfUrl = `http://localhost:${port}/health`;
+        // RENDER_EXTERNAL_URL があれば外部経由で ping（Render のルーティング層を通すことでアイドルスピンダウンを防ぐ）
+        const selfUrl = process.env.RENDER_EXTERNAL_URL
+            ? `${process.env.RENDER_EXTERNAL_URL}/health`
+            : `http://localhost:${port}/health`;
         setInterval(() => {
             import("node:http").then(({ request }) => {
                 const req = request(selfUrl, (res) => {
