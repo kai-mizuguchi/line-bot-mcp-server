@@ -154,21 +154,25 @@ async function loadApp() {
         const songLines = songs.map((s, i) => `${i + 1}. ${s}`).join("\n");
         const prompt = [
             "あなたはバンドのセットリスト用ポスターを SVG で作るデザイナーです。",
-            "以下の情報から 1280x720 の SVG を 1 つだけ生成してください。",
+            "以下の情報から A4 縦 (1240x1754) の SVG を 1 つだけ生成してください。",
             "",
             `テーマ: ${theme} — ${guide}`,
             `タイトル: ${title || "セットリスト"}`,
             `日付: ${date || "(なし)"}`,
+            `曲数: ${songs.length}`,
             "曲順:",
             songLines,
             "",
             "要件:",
             "- 出力は <svg ...>...</svg> のみ。前後の説明・コードフェンス・XML 宣言は禁止",
-            '- ルートは <svg width="1280" height="720" viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg">',
+            '- ルートは <svg width="1240" height="1754" viewBox="0 0 1240 1754" xmlns="http://www.w3.org/2000/svg">',
             '- 文字列の font-family は "sans-serif" のみ使う（独自フォント名は使用しない）',
-            "- 背景はテーマ色の linearGradient を使う",
-            "- タイトルを大きく目立たせ、曲は番号付きで縦に並べる",
-            "- 曲数が多い場合は文字サイズを縮めてはみ出さないようにする",
+            "- 背景はテーマ色の linearGradient で全面 (1240x1754) を塗る",
+            "- 上下左右に 80px 以上の余白を取る",
+            "- タイトルを大きく目立たせ、その下に日付（あれば）、その下に番号付きの曲リストを縦に並べる",
+            "- 文字サイズは曲数に応じて調整する。曲リストは最初の曲から最後の曲まで縦にバランス良く配置し、ページからはみ出さない・上下に大きな空白が残らないようにする",
+            "  - 目安: 10 曲以下なら曲のフォント 56-72px、11-20 曲は 36-52px、21 曲以上は 24-34px",
+            "  - タイトルは曲フォントの 1.6〜2.2 倍程度を目安に、長い場合は縮小",
             "- 日本語の曲名・タイトルがそのまま読めるよう、テキストノードに直接書く（path 化しない）",
         ].join("\n");
         const res = await anthropic.messages.create({
@@ -196,7 +200,7 @@ async function loadApp() {
                 loadSystemFonts: !fontPath,
                 defaultFontFamily: "sans-serif",
             },
-            fitTo: { mode: "width", value: 1280 },
+            fitTo: { mode: "width", value: 1240 },
         });
         const png = resvg.render().asPng();
         const filename = `setlist-${Date.now()}.png`;
