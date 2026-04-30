@@ -29,7 +29,9 @@ function log(msg: string): void {
   process.stderr.write(line);
 }
 
-log(`[boot] Node.js ${process.version} PORT=${process.env.PORT ?? "(not set)"} NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}`);
+log(
+  `[boot] Node.js ${process.version} PORT=${process.env.PORT ?? "(not set)"} NODE_ENV=${process.env.NODE_ENV ?? "(not set)"}`,
+);
 
 process.on("uncaughtException", (err: Error) => {
   log(`[fatal] uncaughtException: ${err.message}\n${err.stack}`);
@@ -121,25 +123,29 @@ async function loadApp() {
   // Claude の返答から Markdown 記法を除去して LINE 向けプレーンテキストに変換
   function stripMarkdown(text: string): string {
     return text
-      .replace(/\*\*(.*?)\*\*/g, "$1")           // **bold** → bold
-      .replace(/\*(.*?)\*/g, "$1")               // *italic* → italic
-      .replace(/^#{1,6}\s+/gm, "")              // ## heading → plain
-      .replace(/^[\-\*\+]\s+/gm, "・")          // - list → ・
-      .replace(/`{1,3}[^`\n]*`{1,3}/g, "")      // `code` → 削除
+      .replace(/\*\*(.*?)\*\*/g, "$1") // **bold** → bold
+      .replace(/\*(.*?)\*/g, "$1") // *italic* → italic
+      .replace(/^#{1,6}\s+/gm, "") // ## heading → plain
+      .replace(/^[\-\*\+]\s+/gm, "・") // - list → ・
+      .replace(/`{1,3}[^`\n]*`{1,3}/g, "") // `code` → 削除
       .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1") // [text](url) → text
-      .replace(/\n{3,}/g, "\n\n")               // 連続空行を2行に
+      .replace(/\n{3,}/g, "\n\n") // 連続空行を2行に
       .trim();
   }
 
   // SETLIST_IMAGE ブロックをパース（テキスト中のどこにあっても検出）
-  function parseSetlistData(text: string): { theme: string; title: string; date: string; songs: string[] } | null {
+  function parseSetlistData(
+    text: string,
+  ): { theme: string; title: string; date: string; songs: string[] } | null {
     const start = text.indexOf("SETLIST_IMAGE");
     if (start === -1) return null;
     const end = text.indexOf("END_SETLIST", start);
     if (end === -1) return null;
     const block = text.slice(start, end + "END_SETLIST".length);
-    const lines = block.split("\n").map((l) => l.trim());
-    let theme = "dark", title = "セットリスト", date = "";
+    const lines = block.split("\n").map(l => l.trim());
+    let theme = "dark",
+      title = "セットリスト",
+      date = "";
     const songs: string[] = [];
     for (const line of lines) {
       if (!line || line === "SETLIST_IMAGE" || line === "END_SETLIST") continue;
@@ -151,95 +157,109 @@ async function loadApp() {
     return songs.length > 0 ? { theme, title, date, songs } : null;
   }
 
-  type SetlistTheme = { bg: [string, string]; title: string; date: string; num: string; song: string; accent: string; divider: string };
-  const THEMES: Record<string, SetlistTheme> = {
-    dark:    { bg: ["#1a1a2e", "#16213e"], title: "#ff6b6b", date: "#888888", num: "#ff6b6b", song: "#eeeeee", accent: "#ff6b6b", divider: "#2a2a5a" },
-    light:   { bg: ["#f4f4f4", "#ffffff"], title: "#333333", date: "#888888", num: "#e05555", song: "#333333", accent: "#e05555", divider: "#dddddd" },
-    neon:    { bg: ["#000000", "#0d0d0d"], title: "#ff2df7", date: "#888888", num: "#ff2df7", song: "#00f0c0", accent: "#ff2df7", divider: "#222222" },
-    vintage: { bg: ["#f5e6c8", "#edd9a3"], title: "#7a3b1e", date: "#9a7040", num: "#7a3b1e", song: "#3e2612", accent: "#7a3b1e", divider: "#c4a06a" },
+  const THEME_GUIDE: Record<string, string> = {
+    dark: "濃紺グラデーション、クール系。bg gradient #1a1a2e → #16213e、title #ff6b6b、song text #eeeeee、accent #ff6b6b、divider #2a2a5a",
+    light:
+      "白背景シンプル、見やすい。bg gradient #f4f4f4 → #ffffff、title #333333、song text #333333、accent #e05555、divider #dddddd",
+    neon: "黒背景＋蛍光、派手め。bg gradient #000000 → #0d0d0d、title #ff2df7、song text #00f0c0、accent #ff2df7、divider #222222",
+    vintage:
+      "ベージュ＋レトロ、温かみ。bg gradient #f5e6c8 → #edd9a3、title #7a3b1e、song text #3e2612、accent #7a3b1e、divider #c4a06a",
   };
 
-  // @napi-rs/canvas でセトリ画像を生成して /tmp に保存（Chrome不要）
-  async function generateSetlistImage(theme: string, title: string, date: string, songs: string[]): Promise<string> {
-    const { createCanvas, GlobalFonts } = await import("@napi-rs/canvas");
-    const t = THEMES[theme] ?? THEMES["dark"];
-
-    // 日本語フォントを探して登録（見つからなければシステムデフォルトで続行）
-    const jpFontPaths = [
+  // 日本語フォントを探して resvg に渡すパスを返す
+  function findJpFont(): string | null {
+    const candidates = [
       process.env.FONT_PATH,
-      "assets/ipag.ttf",                                                    // バンドル済み IPA Gothic
+      "assets/ipag.ttf",
       "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
       "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
       "/usr/share/fonts/truetype/noto/NotoSansCJKjp-Regular.otf",
       "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
       "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf",
     ].filter(Boolean) as string[];
-    let fontFamily = "sans-serif";
-    for (const p of jpFontPaths) {
-      if (existsSync(p)) {
-        try {
-          GlobalFonts.registerFromPath(p, "JpFont");
-          fontFamily = "JpFont";
-          log(`[setlist] font: ${p}`);
-        } catch { /* ignore */ }
-        break;
+    for (const p of candidates) {
+      if (existsSync(p)) return p;
+    }
+    return null;
+  }
+
+  // Claude が返した文字列から <svg>...</svg> を抜き出す
+  function extractSvg(text: string): string | null {
+    const match = text.match(/<svg[\s\S]*?<\/svg>/i);
+    return match ? match[0] : null;
+  }
+
+  // Claude Haiku に SVG を生成させて resvg で PNG にレンダリングし /tmp に保存
+  async function generateSetlistImage(
+    theme: string,
+    title: string,
+    date: string,
+    songs: string[],
+  ): Promise<string> {
+    const guide = THEME_GUIDE[theme] ?? THEME_GUIDE["dark"];
+    const songLines = songs.map((s, i) => `${i + 1}. ${s}`).join("\n");
+
+    const prompt = [
+      "あなたはバンドのセットリスト用ポスターを SVG で作るデザイナーです。",
+      "以下の情報から 1280x720 の SVG を 1 つだけ生成してください。",
+      "",
+      `テーマ: ${theme} — ${guide}`,
+      `タイトル: ${title || "セットリスト"}`,
+      `日付: ${date || "(なし)"}`,
+      "曲順:",
+      songLines,
+      "",
+      "要件:",
+      "- 出力は <svg ...>...</svg> のみ。前後の説明・コードフェンス・XML 宣言は禁止",
+      '- ルートは <svg width="1280" height="720" viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg">',
+      '- 文字列の font-family は "sans-serif" のみ使う（独自フォント名は使用しない）',
+      "- 背景はテーマ色の linearGradient を使う",
+      "- タイトルを大きく目立たせ、曲は番号付きで縦に並べる",
+      "- 曲数が多い場合は文字サイズを縮めてはみ出さないようにする",
+      "- 日本語の曲名・タイトルがそのまま読めるよう、テキストノードに直接書く（path 化しない）",
+    ].join("\n");
+
+    const res = await anthropic.messages.create({
+      model: "claude-haiku-4-5",
+      max_tokens: 4000,
+      messages: [{ role: "user", content: prompt }],
+    });
+    let raw = "";
+    for (const block of res.content) {
+      if (block.type === "text") {
+        raw += block.text;
       }
     }
+    const svg = extractSvg(raw);
+    if (!svg) throw new Error("Claude did not return a valid <svg> block");
 
-    const W = 1280, H = 720;
-    const canvas = createCanvas(W, H);
-    const ctx = canvas.getContext("2d");
-
-    // 背景グラデーション
-    const grad = ctx.createLinearGradient(0, 0, W, H);
-    grad.addColorStop(0, t.bg[0]);
-    grad.addColorStop(1, t.bg[1]);
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, W, H);
-
-    // アクセントライン
-    ctx.fillStyle = t.accent;
-    ctx.fillRect(80, 32, 180, 4);
-
-    // タイトル
-    ctx.fillStyle = t.title;
-    ctx.font = `bold 54px "${fontFamily}", sans-serif`;
-    ctx.fillText(`♪ ${title || "セットリスト"}`, 80, 115);
-
-    // 日付
-    let startY = 178;
-    if (date) {
-      ctx.fillStyle = t.date;
-      ctx.font = `28px "${fontFamily}", sans-serif`;
-      ctx.fillText(date, 84, 158);
-      startY = 210;
-    }
-
-    // 区切り線
-    ctx.strokeStyle = t.divider;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(80, startY - 8);
-    ctx.lineTo(W - 80, startY - 8);
-    ctx.stroke();
-
-    // 曲リスト
-    const lineHeight = Math.min(64, Math.floor((H - startY - 40) / Math.max(songs.length, 1)));
-    const fontSize = Math.min(36, Math.floor(lineHeight * 0.72));
-    songs.forEach((song, i) => {
-      const y = startY + i * lineHeight + fontSize;
-      ctx.fillStyle = t.num;
-      ctx.font = `bold ${fontSize}px "${fontFamily}", sans-serif`;
-      ctx.fillText(`${i + 1}.`, 80, y);
-      ctx.fillStyle = t.song;
-      ctx.font = `${fontSize}px "${fontFamily}", sans-serif`;
-      ctx.fillText(song, 80 + fontSize * 2.2, y);
+    const { Resvg } = await import("@resvg/resvg-js");
+    const fontPath = findJpFont();
+    if (fontPath) log(`[setlist] font: ${fontPath}`);
+    const resvg = new Resvg(svg, {
+      background: "#ffffff",
+      font: {
+        fontFiles: fontPath ? [fontPath] : [],
+        loadSystemFonts: !fontPath,
+        defaultFontFamily: "sans-serif",
+      },
+      fitTo: { mode: "width", value: 1280 },
     });
+    const png = resvg.render().asPng();
 
     const filename = `setlist-${Date.now()}.png`;
     const filepath = `/tmp/${filename}`;
-    writeFileSync(filepath, canvas.toBuffer("image/png"));
-    setTimeout(() => { try { unlinkSync(filepath); } catch { /* ignore */ } }, 10 * 60 * 1000);
+    writeFileSync(filepath, png);
+    setTimeout(
+      () => {
+        try {
+          unlinkSync(filepath);
+        } catch {
+          /* ignore */
+        }
+      },
+      10 * 60 * 1000,
+    );
     return filename;
   }
 
@@ -261,14 +281,25 @@ async function loadApp() {
         max_tokens: 150,
         messages: [
           ...toSummarize,
-          { role: "user", content: "Summarize the above conversation in 1-2 short sentences in Japanese." },
+          {
+            role: "user",
+            content:
+              "Summarize the above conversation in 1-2 short sentences in Japanese.",
+          },
         ],
       });
       let summary = "";
       for (const block of res.content) {
-        if (block.type === "text") { summary = block.text; break; }
+        if (block.type === "text") {
+          summary = block.text;
+          break;
+        }
       }
-      if (summary) history.unshift({ role: "user", content: `[以前の会話の要約: ${summary}]` });
+      if (summary)
+        history.unshift({
+          role: "user",
+          content: `[以前の会話の要約: ${summary}]`,
+        });
     } catch {
       // 要約失敗時は古い分はsplice済みのままで続行
     }
@@ -299,7 +330,9 @@ async function loadApp() {
     botDisplayName = botInfo.displayName;
     log(`[boot] botUserId=${botUserId} displayName=${botDisplayName}`);
   } catch (err: unknown) {
-    log(`[boot] getBotInfo failed: ${err instanceof Error ? err.message : String(err)}`);
+    log(
+      `[boot] getBotInfo failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 
   function createMCPServer() {
@@ -354,30 +387,42 @@ async function loadApp() {
       // グループ/ルームに追加された時の自己紹介
       if (event.type === "join" && event.replyToken) {
         const name = botDisplayName || "豚人間くん";
-        await messagingApiClient.replyMessage({
-          replyToken: event.replyToken,
-          messages: [{
-            type: "text",
-            text: `はじめまして！${name}です。\n友だち追加ありがとうございます😉\n\nバンドやグループに関する様々な雑務をお手伝いさせていただきます！\n僕に何か頼みたいときは必ず僕宛にメンションをお願いします🐷`,
-          }],
-        }).catch((err: unknown) => {
-          log(`[webhook] join reply error: ${err instanceof Error ? err.message : String(err)}`);
-        });
+        await messagingApiClient
+          .replyMessage({
+            replyToken: event.replyToken,
+            messages: [
+              {
+                type: "text",
+                text: `はじめまして！${name}です。\n友だち追加ありがとうございます😉\n\nバンドやグループに関する様々な雑務をお手伝いさせていただきます！\n僕に何か頼みたいときは必ず僕宛にメンションをお願いします🐷`,
+              },
+            ],
+          })
+          .catch((err: unknown) => {
+            log(
+              `[webhook] join reply error: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
         continue;
       }
 
       if (!(event.type === "message" && event.replyToken)) continue;
 
-      const isGroupChat = event.source?.type === "group" || event.source?.type === "room";
-      const mentionees: Array<{ index: number; length: number; userId?: string }> =
-        event.message?.mention?.mentionees ?? [];
-      const isMentioned = mentionees.some((m) => m.userId === botUserId);
+      const isGroupChat =
+        event.source?.type === "group" || event.source?.type === "room";
+      const mentionees: Array<{
+        index: number;
+        length: number;
+        userId?: string;
+      }> = event.message?.mention?.mentionees ?? [];
+      const isMentioned = mentionees.some(m => m.userId === botUserId);
       const isAdmin = !!adminUserId && event.source?.userId === adminUserId;
       const historyKey = [
         event.source?.groupId,
         event.source?.roomId,
         event.source?.userId,
-      ].filter(Boolean).join(":");
+      ]
+        .filter(Boolean)
+        .join(":");
 
       // 現在日時（Asia/Tokyo）を system prompt に追記
       const now = new Date().toLocaleString("ja-JP", {
@@ -391,8 +436,9 @@ async function loadApp() {
       });
       // 管理者は Security セクションなし、それ以外はフル system prompt
       const basePrompt = isAdmin ? systemPromptAdmin : systemPrompt;
-      const systemWithDate = (basePrompt ? basePrompt + "\n\n" : "")
-        + `Current date/time (JST): ${now}`;
+      const systemWithDate =
+        (basePrompt ? basePrompt + "\n\n" : "") +
+        `Current date/time (JST): ${now}`;
 
       if (event.message?.type === "text") {
         // グループ/ルームの場合はメンションされた時だけ返信（管理者も同様）
@@ -402,7 +448,8 @@ async function loadApp() {
         let userText = event.message.text as string;
         const sorted = [...mentionees].sort((a, b) => b.index - a.index);
         for (const m of sorted) {
-          userText = userText.slice(0, m.index) + userText.slice(m.index + m.length);
+          userText =
+            userText.slice(0, m.index) + userText.slice(m.index + m.length);
         }
         userText = userText.trim();
         if (!userText) continue;
@@ -410,12 +457,18 @@ async function loadApp() {
         // /myid コマンド：送信者の userId をそのまま返す
         if (userText === "/myid") {
           const userId = event.source?.userId ?? "(不明)";
-          await messagingApiClient.replyMessage({
-            replyToken: event.replyToken,
-            messages: [{ type: "text", text: `あなたのLINE IDは ${userId} です` }],
-          }).catch((err: unknown) => {
-            log(`[webhook] /myid reply error: ${err instanceof Error ? err.message : String(err)}`);
-          });
+          await messagingApiClient
+            .replyMessage({
+              replyToken: event.replyToken,
+              messages: [
+                { type: "text", text: `あなたのLINE IDは ${userId} です` },
+              ],
+            })
+            .catch((err: unknown) => {
+              log(
+                `[webhook] /myid reply error: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            });
           continue;
         }
 
@@ -424,12 +477,18 @@ async function loadApp() {
           conversationHistory.delete(historyKey);
           lastActiveMap.delete(historyKey);
           pendingImageState.delete(historyKey);
-          await messagingApiClient.replyMessage({
-            replyToken: event.replyToken,
-            messages: [{ type: "text", text: "会話履歴をリセットしました✅" }],
-          }).catch((err: unknown) => {
-            log(`[webhook] /reset reply error: ${err instanceof Error ? err.message : String(err)}`);
-          });
+          await messagingApiClient
+            .replyMessage({
+              replyToken: event.replyToken,
+              messages: [
+                { type: "text", text: "会話履歴をリセットしました✅" },
+              ],
+            })
+            .catch((err: unknown) => {
+              log(
+                `[webhook] /reset reply error: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            });
           continue;
         }
 
@@ -447,28 +506,54 @@ async function loadApp() {
 
           let rawReplyText = "";
           for (const block of aiResponse.content) {
-            if (block.type === "text") { rawReplyText = block.text; break; }
+            if (block.type === "text") {
+              rawReplyText = block.text;
+              break;
+            }
           }
 
-          pendingImageState.set(historyKey, { ts: Date.now(), context: userText });
+          pendingImageState.set(historyKey, {
+            ts: Date.now(),
+            context: userText,
+          });
 
           const setlistData = parseSetlistData(rawReplyText);
           if (setlistData) {
             // セトリ画像を生成して送信
             try {
-              const filename = await generateSetlistImage(setlistData.theme, setlistData.title, setlistData.date, setlistData.songs);
-              const serviceUrl = process.env.RENDER_EXTERNAL_URL ?? `http://localhost:${process.env.PORT ?? "10000"}`;
+              const filename = await generateSetlistImage(
+                setlistData.theme,
+                setlistData.title,
+                setlistData.date,
+                setlistData.songs,
+              );
+              const serviceUrl =
+                process.env.RENDER_EXTERNAL_URL ??
+                `http://localhost:${process.env.PORT ?? "10000"}`;
               const imageUrl = `${serviceUrl}/tmp/${filename}`;
-              history.push({ role: "assistant", content: `[セトリ画像: ${setlistData.title}]` });
+              history.push({
+                role: "assistant",
+                content: `[セトリ画像: ${setlistData.title}]`,
+              });
               conversationHistory.set(historyKey, history);
               lastActiveMap.set(historyKey, Date.now());
               await messagingApiClient.replyMessage({
                 replyToken: event.replyToken,
-                messages: [{ type: "image", originalContentUrl: imageUrl, previewImageUrl: imageUrl }],
+                messages: [
+                  {
+                    type: "image",
+                    originalContentUrl: imageUrl,
+                    previewImageUrl: imageUrl,
+                  },
+                ],
               });
             } catch (imgErr: unknown) {
-              log(`[webhook] Setlist image error: ${imgErr instanceof Error ? imgErr.message : String(imgErr)}`);
-              const fallback = `🎸 ${setlistData.title}${setlistData.date ? "\n" + setlistData.date : ""}\n\n` + setlistData.songs.map((s, i) => `${i + 1}. ${s}`).join("\n");
+              log(
+                `[webhook] Setlist image error: ${imgErr instanceof Error ? imgErr.message : String(imgErr)}`,
+              );
+              const fallback =
+                `🎸 ${setlistData.title}${setlistData.date ? "\n" + setlistData.date : ""}\n\n` +
+                setlistData.songs.map((s, i) => `${i + 1}. ${s}`).join("\n");
               history.push({ role: "assistant", content: fallback });
               conversationHistory.set(historyKey, history);
               lastActiveMap.set(historyKey, Date.now());
@@ -478,7 +563,9 @@ async function loadApp() {
               });
             }
           } else {
-            const replyText = stripMarkdown(rawReplyText || "すみません、うまく応答できませんでした。").slice(0, 5000);
+            const replyText = stripMarkdown(
+              rawReplyText || "すみません、うまく応答できませんでした。",
+            ).slice(0, 5000);
             history.push({ role: "assistant", content: replyText });
             conversationHistory.set(historyKey, history);
             lastActiveMap.set(historyKey, Date.now());
@@ -488,13 +575,23 @@ async function loadApp() {
             });
           }
         } catch (err: unknown) {
-          log(`[webhook] Claude API error: ${err instanceof Error ? err.message : String(err)}`);
-          await messagingApiClient.replyMessage({
-            replyToken: event.replyToken,
-            messages: [{ type: "text", text: "ちょっと調子が悪いみたい😵 少し待ってから再送してね🙏" }],
-          }).catch(() => { /* replyToken already used or expired */ });
+          log(
+            `[webhook] Claude API error: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          await messagingApiClient
+            .replyMessage({
+              replyToken: event.replyToken,
+              messages: [
+                {
+                  type: "text",
+                  text: "ちょっと調子が悪いみたい😵 少し待ってから再送してね🙏",
+                },
+              ],
+            })
+            .catch(() => {
+              /* replyToken already used or expired */
+            });
         }
-
       } else if (event.message?.type === "image") {
         // グループ: メンション後2分以内のみ処理、1:1: 常時処理
         let imagePrompt = "この画像について教えて";
@@ -505,17 +602,23 @@ async function loadApp() {
         }
 
         try {
-          const stream = await lineBlobClient.getMessageContent(event.message.id);
+          const stream = await lineBlobClient.getMessageContent(
+            event.message.id,
+          );
           const imgChunks: Buffer[] = [];
           for await (const chunk of stream) {
-            imgChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+            imgChunks.push(
+              Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string),
+            );
           }
           const base64 = Buffer.concat(imgChunks).toString("base64");
 
           const history = conversationHistory.get(historyKey) ?? [];
           // 1:1 の場合、直前のユーザー発言を指示として使う
           if (!isGroupChat) {
-            const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
+            const lastUserMsg = [...history]
+              .reverse()
+              .find(m => m.role === "user");
             if (lastUserMsg) imagePrompt = lastUserMsg.content;
           }
 
@@ -530,7 +633,11 @@ async function loadApp() {
                 content: [
                   {
                     type: "image",
-                    source: { type: "base64", media_type: "image/jpeg", data: base64 },
+                    source: {
+                      type: "base64",
+                      media_type: "image/jpeg",
+                      data: base64,
+                    },
                   },
                   { type: "text", text: imagePrompt },
                 ],
@@ -556,41 +663,58 @@ async function loadApp() {
             messages: [{ type: "text", text: replyText }],
           });
         } catch (err: unknown) {
-          log(`[webhook] Vision error: ${err instanceof Error ? err.message : String(err)}`);
-          await messagingApiClient.replyMessage({
-            replyToken: event.replyToken,
-            messages: [{ type: "text", text: "画像の処理中にエラーが起きたよ😵 少し待ってから再送してね🙏" }],
-          }).catch(() => { /* replyToken already used or expired */ });
+          log(
+            `[webhook] Vision error: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          await messagingApiClient
+            .replyMessage({
+              replyToken: event.replyToken,
+              messages: [
+                {
+                  type: "text",
+                  text: "画像の処理中にエラーが起きたよ😵 少し待ってから再送してね🙏",
+                },
+              ],
+            })
+            .catch(() => {
+              /* replyToken already used or expired */
+            });
         }
-
       } else {
         // スタンプ・音声・ファイルなど未対応メッセージ
         if (isGroupChat && !isMentioned) continue;
         try {
           await messagingApiClient.replyMessage({
             replyToken: event.replyToken,
-            messages: [{ type: "text", text: "テキスト以外は対応していません🙏" }],
+            messages: [
+              { type: "text", text: "テキスト以外は対応していません🙏" },
+            ],
           });
         } catch (err: unknown) {
-          log(`[webhook] Reply error: ${err instanceof Error ? err.message : String(err)}`);
+          log(
+            `[webhook] Reply error: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
     }
   }
 
   // 24時間非アクティブなユーザーの履歴を削除（1時間ごとにチェック）
-  setInterval(() => {
-    const now = Date.now();
-    let count = 0;
-    for (const [key, lastActive] of lastActiveMap) {
-      if (now - lastActive > HISTORY_TTL) {
-        conversationHistory.delete(key);
-        lastActiveMap.delete(key);
-        count++;
+  setInterval(
+    () => {
+      const now = Date.now();
+      let count = 0;
+      for (const [key, lastActive] of lastActiveMap) {
+        if (now - lastActive > HISTORY_TTL) {
+          conversationHistory.delete(key);
+          lastActiveMap.delete(key);
+          count++;
+        }
       }
-    }
-    if (count > 0) log(`[history] Expired ${count} inactive conversation(s)`);
-  }, 60 * 60 * 1000); // 1時間ごと
+      if (count > 0) log(`[history] Expired ${count} inactive conversation(s)`);
+    },
+    60 * 60 * 1000,
+  ); // 1時間ごと
 
   return {
     createMCPServer,
@@ -607,11 +731,20 @@ async function loadApp() {
 async function main() {
   const port = parseInt(process.env.PORT ?? "10000");
 
-  log(`[startup] CHANNEL_ACCESS_TOKEN=${process.env.CHANNEL_ACCESS_TOKEN ? "set" : "NOT SET"}`);
-  log(`[startup] ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY ? "set" : "NOT SET"}`);
+  log(
+    `[startup] CHANNEL_ACCESS_TOKEN=${process.env.CHANNEL_ACCESS_TOKEN ? "set" : "NOT SET"}`,
+  );
+  log(
+    `[startup] ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY ? "set" : "NOT SET"}`,
+  );
   log(`[startup] Calling httpServer.listen(${port})...`);
 
-  const transports: Record<string, InstanceType<typeof import("@modelcontextprotocol/sdk/server/sse.js")["SSEServerTransport"]>> = {};
+  const transports: Record<
+    string,
+    InstanceType<
+      (typeof import("@modelcontextprotocol/sdk/server/sse.js"))["SSEServerTransport"]
+    >
+  > = {};
 
   const httpServer = createServer((req, res) => {
     (async () => {
@@ -653,7 +786,9 @@ async function main() {
         });
         await server.connect(transport);
       } else if (req.method === "POST" && req.url?.startsWith("/message")) {
-        const sessionId = new URL(req.url, "http://localhost").searchParams.get("sessionId");
+        const sessionId = new URL(req.url, "http://localhost").searchParams.get(
+          "sessionId",
+        );
         if (sessionId && transports[sessionId]) {
           await transports[sessionId].handlePostMessage(req, res);
         } else {
@@ -686,28 +821,37 @@ async function main() {
     log(`[startup] HTTP server listening on port ${port}`);
 
     if (!process.env.CHANNEL_ACCESS_TOKEN) {
-      log("[startup] WARNING: CHANNEL_ACCESS_TOKEN not set — API calls will fail");
+      log(
+        "[startup] WARNING: CHANNEL_ACCESS_TOKEN not set — API calls will fail",
+      );
     }
 
     getApp()
       .then(() => log("[startup] Application ready"))
-      .catch(err => log(`[startup] Module load failed: ${err.message}\n${err.stack}`));
+      .catch(err =>
+        log(`[startup] Module load failed: ${err.message}\n${err.stack}`),
+      );
 
     // Self-ping every 10 minutes to prevent Render free tier from spinning down
     // RENDER_EXTERNAL_URL があれば外部経由で ping（Render のルーティング層を通すことでアイドルスピンダウンを防ぐ）
     const selfUrl = process.env.RENDER_EXTERNAL_URL
       ? `${process.env.RENDER_EXTERNAL_URL}/health`
       : `http://localhost:${port}/health`;
-    setInterval(() => {
-      import("node:http").then(({ request }) => {
-        const req = request(selfUrl, (res) => {
-          res.resume(); // drain response
-          log(`[keepalive] self-ping ${res.statusCode}`);
+    setInterval(
+      () => {
+        import("node:http").then(({ request }) => {
+          const req = request(selfUrl, res => {
+            res.resume(); // drain response
+            log(`[keepalive] self-ping ${res.statusCode}`);
+          });
+          req.on("error", err =>
+            log(`[keepalive] self-ping error: ${err.message}`),
+          );
+          req.end();
         });
-        req.on("error", (err) => log(`[keepalive] self-ping error: ${err.message}`));
-        req.end();
-      });
-    }, 10 * 60 * 1000); // 10分
+      },
+      10 * 60 * 1000,
+    ); // 10分
   });
 }
 
