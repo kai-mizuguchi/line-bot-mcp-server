@@ -704,13 +704,15 @@ async function main() {
         const selfUrl = process.env.RENDER_EXTERNAL_URL
             ? `${process.env.RENDER_EXTERNAL_URL}/health`
             : `http://localhost:${port}/health`;
+        const useHttps = selfUrl.startsWith("https:");
         setInterval(() => {
-            import("node:http").then(({ request }) => {
+            const mod = useHttps ? import("node:https") : import("node:http");
+            mod.then(({ request }) => {
                 const req = request(selfUrl, res => {
                     res.resume(); // drain response
                     log(`[keepalive] self-ping ${res.statusCode}`);
                 });
-                req.on("error", err => log(`[keepalive] self-ping error: ${err.message}`));
+                req.on("error", (err) => log(`[keepalive] self-ping error: ${err.message}`));
                 req.end();
             });
         }, 10 * 60 * 1000); // 10分
