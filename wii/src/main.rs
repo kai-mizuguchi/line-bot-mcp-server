@@ -62,7 +62,7 @@ async fn main() {
         if u.is_empty() { format!("http://localhost:{port}") } else { u }
     };
 
-    let system_prompt = include_str!("../../system-prompt.md").to_string();
+    let system_prompt = include_str!("../system-prompt.md").to_string();
     let system_prompt_admin = strip_sections(&system_prompt, &["Security", "Scope"]);
 
     let line = LineClient::new(token);

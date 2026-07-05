@@ -13,7 +13,7 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 const W: usize = 1280;
 const H: usize = 720;
-const FONT_BYTES: &[u8] = include_bytes!("../../assets/ipag.ttf");
+const FONT_BYTES: &[u8] = include_bytes!("../assets/ipag.ttf");
 
 type Rgb = [u8; 3];
 
