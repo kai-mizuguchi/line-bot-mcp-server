@@ -5,7 +5,7 @@ mod render;
 mod setlist;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -43,8 +43,10 @@ struct AppState {
     external_url: String,
     system_prompt: String,
     system_prompt_admin: String,
-    bot_user_id: String,
-    bot_display_name: String,
+    // Fetched after startup so a transient LINE outage at boot never blocks the
+    // listener from binding. Empty until the first successful getBotInfo.
+    bot_user_id: RwLock<String>,
+    bot_display_name: RwLock<String>,
     convos: tokio::sync::Mutex<HashMap<String, Conv>>,
     pending: tokio::sync::Mutex<HashMap<String, Pending>>,
 }
@@ -66,16 +68,6 @@ async fn main() {
     let system_prompt_admin = strip_sections(&system_prompt, &["Security", "Scope"]);
 
     let line = LineClient::new(token);
-    let (bot_user_id, bot_display_name) = match line.get_bot_info().await {
-        Ok(info) => {
-            tracing::info!("botUserId={} displayName={}", info.user_id, info.display_name);
-            (info.user_id, info.display_name)
-        }
-        Err(e) => {
-            tracing::warn!("getBotInfo failed: {e}");
-            (String::new(), String::new())
-        }
-    };
 
     let state = Arc::new(AppState {
         line,
@@ -85,13 +77,14 @@ async fn main() {
         external_url,
         system_prompt,
         system_prompt_admin,
-        bot_user_id,
-        bot_display_name,
+        bot_user_id: RwLock::new(String::new()),
+        bot_display_name: RwLock::new(String::new()),
         convos: tokio::sync::Mutex::new(HashMap::new()),
         pending: tokio::sync::Mutex::new(HashMap::new()),
     });
 
     spawn_history_sweeper(state.clone());
+    spawn_bot_info_fetcher(state.clone());
 
     let app = Router::new()
         .route("/", get(health))
@@ -170,11 +163,8 @@ async fn handle_event(state: &AppState, event: Event) {
     };
 
     if event.event_type == "join" {
-        let name = if state.bot_display_name.is_empty() {
-            "豚人間くん"
-        } else {
-            &state.bot_display_name
-        };
+        let display = state.bot_display_name.read().unwrap().clone();
+        let name = if display.is_empty() { "豚人間くん" } else { &display };
         let text = format!(
             "はじめまして！{name}です。\n友だち追加ありがとうございます😉\n\nバンドやグループに関する様々な雑務をお手伝いさせていただきます！\n僕に何か頼みたいときは必ず僕宛にメンションをお願いします🐷"
         );
@@ -196,9 +186,11 @@ async fn handle_event(state: &AppState, event: Event) {
         .as_ref()
         .map(|m| m.mentionees.clone())
         .unwrap_or_default();
-    let is_mentioned = mentionees
-        .iter()
-        .any(|m| m.user_id.as_deref() == Some(state.bot_user_id.as_str()));
+    let bot_user_id = state.bot_user_id.read().unwrap().clone();
+    let is_mentioned = !bot_user_id.is_empty()
+        && mentionees
+            .iter()
+            .any(|m| m.user_id.as_deref() == Some(bot_user_id.as_str()));
     let is_admin =
         !state.admin_user.is_empty() && source.user_id.as_deref() == Some(state.admin_user.as_str());
     let history_key = [&source.group_id, &source.room_id, &source.user_id]
@@ -440,6 +432,29 @@ async fn reply_text(state: &AppState, reply_token: &str, text: &str) {
     if let Err(e) = state.line.reply(reply_token, messages).await {
         tracing::warn!("reply error: {e}");
     }
+}
+
+/// Fetch the bot's own userId/displayName in the background, retrying with
+/// capped backoff. Until it succeeds, group mention-gating simply won't match
+/// (groups stay quiet, 1:1 works); this self-heals without blocking startup.
+fn spawn_bot_info_fetcher(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut backoff = 3u64;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(15), state.line.get_bot_info()).await {
+                Ok(Ok(info)) => {
+                    tracing::info!("botUserId={} displayName={}", info.user_id, info.display_name);
+                    *state.bot_user_id.write().unwrap() = info.user_id;
+                    *state.bot_display_name.write().unwrap() = info.display_name;
+                    return;
+                }
+                Ok(Err(e)) => tracing::warn!("getBotInfo failed: {e}"),
+                Err(_) => tracing::warn!("getBotInfo timed out"),
+            }
+            tokio::time::sleep(Duration::from_secs(backoff)).await;
+            backoff = (backoff * 2).min(60);
+        }
+    });
 }
 
 fn spawn_history_sweeper(state: Arc<AppState>) {
