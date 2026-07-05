@@ -15,13 +15,21 @@ TLS は既定で **nginx + acme.sh** が終端し、bot 本体は素の HTTP の
 
 ## 1. バイナリのビルドと配置
 
-Mac 側でクロスビルド（P5 で実施）:
+`system-prompt.md` と `assets/ipag.ttf` は crate 内へ取り込み済みで、
+バイナリに `include_str!/include_bytes!` で同梱される（配備物 1 ファイル）。
+ペルソナ（system-prompt）を変えたら `wii/system-prompt.md` を編集して
+再ビルドが必要。
+
+Mac 側でクロスビルド:
 
 ```bash
 cd wii
 cross build --release --target powerpc-unknown-linux-gnu
 scp target/powerpc-unknown-linux-gnu/release/butaningen root@192.168.0.50:/usr/local/bin/
 ```
+
+実証済み: ring/rustls/reqwest を含め ppc32 BE でビルド可能
+（成果物は ELF 32-bit MSB PowerPC）。
 
 ## 2. 実行ユーザーと環境ファイル
 
