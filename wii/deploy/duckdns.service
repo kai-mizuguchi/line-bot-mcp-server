@@ -1,0 +1,9 @@
+[Unit]
+Description=Update DuckDNS A record
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/butaningen/duckdns.env
+ExecStart=/usr/local/bin/duckdns-update.sh
