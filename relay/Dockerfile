@@ -1,5 +1,7 @@
 # Render deploys this via Docker. Root Directory = relay
 FROM golang:1.23-alpine AS build
+# Let Go auto-download the newer toolchain that tailscale.com requires.
+ENV GOTOOLCHAIN=auto
 WORKDIR /src
 COPY go.mod .
 COPY main.go .
