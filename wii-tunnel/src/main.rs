@@ -64,21 +64,27 @@ async fn main() {
         .build()
         .expect("http client");
 
+    // backoff only grows while we can't even connect; once a connection is
+    // established it resets, so a drop after a healthy link reconnects fast.
     let mut backoff = 1u64;
     loop {
-        match run_once(&url, &secret, &target, &http).await {
-            Ok(_) => {
-                tracing::warn!("tunnel closed; reconnecting");
-                backoff = 1;
-            }
+        match connect(&url, &secret).await {
             Err(e) => {
-                tracing::warn!("tunnel error: {e}; retry in {backoff}s");
+                tracing::warn!("connect error: {e}; retry in {backoff}s");
                 tokio::time::sleep(Duration::from_secs(backoff)).await;
                 backoff = (backoff * 2).min(30);
                 continue;
             }
+            Ok(ws) => {
+                tracing::info!("tunnel connected to relay");
+                backoff = 1;
+                match serve(ws, &target, &http).await {
+                    Ok(_) => tracing::warn!("tunnel closed; reconnecting"),
+                    Err(e) => tracing::warn!("tunnel error: {e}; reconnecting"),
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -90,12 +96,18 @@ fn env(k: &str, def: &str) -> String {
 }
 
 type Err = Box<dyn std::error::Error + Send + Sync>;
+type Ws = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
 
-async fn run_once(url: &str, secret: &str, target: &str, http: &reqwest::Client) -> Result<(), Err> {
+async fn connect(url: &str, secret: &str) -> Result<Ws, Err> {
     let mut req = url.into_client_request()?;
     req.headers_mut().insert("X-Tunnel-Secret", secret.parse()?);
     let (ws, _) = connect_async(req).await?;
-    tracing::info!("tunnel connected to relay");
+    Ok(ws)
+}
+
+async fn serve(ws: Ws, target: &str, http: &reqwest::Client) -> Result<(), Err> {
     let (mut sink, mut stream) = ws.split();
 
     // Single writer fed by an mpsc so request handlers and the heartbeat can
