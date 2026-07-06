@@ -1,74 +1,208 @@
-// butaningen-relay: a thin public reverse proxy that joins the tailnet
-// in-process (tsnet) and forwards every request to the Wii bot over the
-// tailnet. The Wii is behind CGN (WiMAX), so it cannot accept inbound
-// connections directly; the tailnet is the transport. Reply traffic and
-// LINE image fetches flow: LINE -> this relay -> Wii; the bot replies to
+// butaningen-relay: public WebSocket reverse-tunnel front for the Wii bot.
+//
+// The Wii is behind CGN (WiMAX) and its tailscale-rs cannot relay via DERP, so
+// no inbound path exists. Instead the Wii dials OUT to this relay and keeps a
+// WebSocket open (/_tunnel). Every public HTTP request (LINE webhook, health,
+// setlist image GET) is framed and sent over that socket to the Wii, which
+// forwards it to its local bot and returns the response. The bot replies to
 // LINE directly outbound.
 //
 // Env:
-//   TS_AUTHKEY  tailscale auth key (reusable). Required.
-//   WII_TARGET  http://100.121.243.30:10000  (Wii bot tailnet address)
-//   PORT        public listen port (Render sets this)
-//   TS_HOSTNAME tailnet node name (default "butaningen-relay")
+//   TUNNEL_SECRET  shared secret; the Wii must present it to open /_tunnel. Required.
+//   PORT           public listen port (Render sets this).
 package main
 
 import (
 	"context"
+	"encoding/base64"
+	"io"
 	"log"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
-	"tailscale.com/tsnet"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
-func env(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
+type frame struct {
+	Type    string              `json:"type"` // "req" | "resp"
+	ID      uint64              `json:"id"`
+	Method  string              `json:"method,omitempty"`
+	Path    string              `json:"path,omitempty"`
+	Status  int                 `json:"status,omitempty"`
+	Headers map[string][]string `json:"headers,omitempty"`
+	Body    string              `json:"body,omitempty"` // base64
+}
+
+type tunnel struct {
+	out     chan frame
+	pending map[uint64]chan frame
+	mu      sync.Mutex
+	closed  bool
+}
+
+var (
+	cur    atomic.Pointer[tunnel]
+	nextID atomic.Uint64
+)
+
+func (t *tunnel) reply(f frame) {
+	t.mu.Lock()
+	ch := t.pending[f.ID]
+	delete(t.pending, f.ID)
+	t.mu.Unlock()
+	if ch != nil {
+		ch <- f
 	}
-	return def
+}
+
+func (t *tunnel) closeAll() {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return
+	}
+	t.closed = true
+	for id, ch := range t.pending {
+		close(ch)
+		delete(t.pending, id)
+	}
+	t.mu.Unlock()
 }
 
 func main() {
-	target := env("WII_TARGET", "http://100.121.243.30:10000")
-	port := env("PORT", "10000")
-	authKey := os.Getenv("TS_AUTHKEY")
-	if authKey == "" {
-		log.Fatal("TS_AUTHKEY is required")
+	secret := os.Getenv("TUNNEL_SECRET")
+	if secret == "" {
+		log.Fatal("TUNNEL_SECRET is required")
+	}
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "10000"
 	}
 
-	u, err := url.Parse(target)
-	if err != nil {
-		log.Fatalf("bad WII_TARGET %q: %v", target, err)
-	}
-
-	srv := &tsnet.Server{
-		Hostname: env("TS_HOSTNAME", "butaningen-relay"),
-		AuthKey:  authKey,
-		Dir:      "/tmp/tsnet", // ephemeral state dir (Render fs is ephemeral)
-	}
-	defer srv.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	if _, err := srv.Up(ctx); err != nil {
-		log.Fatalf("tailnet up failed: %v", err)
-	}
-	log.Printf("joined tailnet, proxying -> %s", target)
-
-	proxy := httputil.NewSingleHostReverseProxy(u)
-	// Dial the upstream over the tailnet.
-	proxy.Transport = &http.Transport{
-		DialContext:           srv.Dial,
-		ResponseHeaderTimeout: 60 * time.Second,
-	}
-	// LINE signature verification on the Wii uses the raw body, which the
-	// reverse proxy forwards unchanged; no rewriting needed here.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_tunnel", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Tunnel-Secret") != secret {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		serveTunnel(w, r)
+	})
+	mux.HandleFunc("/", proxyToTunnel)
 
 	log.Printf("listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, proxy); err != nil {
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func serveTunnel(w http.ResponseWriter, r *http.Request) {
+	c, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		return
+	}
+	c.SetReadLimit(32 << 20) // 32 MiB frames (images)
+	t := &tunnel{out: make(chan frame, 64), pending: map[uint64]chan frame{}}
+	cur.Store(t)
+	log.Print("tunnel connected")
+	defer func() {
+		cur.CompareAndSwap(t, nil)
+		t.closeAll()
+		c.Close(websocket.StatusNormalClosure, "")
+		log.Print("tunnel disconnected")
+	}()
+
+	ctx := r.Context()
+	// Writer: drain out -> ws.
+	go func() {
+		for f := range t.out {
+			wc, cancel := context.WithTimeout(ctx, 70*time.Second)
+			err := wsjson.Write(wc, c, f)
+			cancel()
+			if err != nil {
+				return
+			}
+		}
+	}()
+	// Reader: resp frames -> pending waiters; also keep-alive pings.
+	for {
+		var f frame
+		if err := wsjson.Read(ctx, c, &f); err != nil {
+			return
+		}
+		if f.Type == "resp" {
+			t.reply(f)
+		}
+	}
+}
+
+func proxyToTunnel(w http.ResponseWriter, r *http.Request) {
+	t := cur.Load()
+	if t == nil {
+		http.Error(w, "tunnel offline", http.StatusServiceUnavailable)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+	if err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	id := nextID.Add(1)
+	ch := make(chan frame, 1)
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		http.Error(w, "tunnel offline", http.StatusServiceUnavailable)
+		return
+	}
+	t.pending[id] = ch
+	t.mu.Unlock()
+
+	req := frame{
+		Type:    "req",
+		ID:      id,
+		Method:  r.Method,
+		Path:    r.URL.RequestURI(),
+		Headers: r.Header,
+		Body:    base64.StdEncoding.EncodeToString(body),
+	}
+	select {
+	case t.out <- req:
+	case <-time.After(5 * time.Second):
+		http.Error(w, "tunnel busy", http.StatusGatewayTimeout)
+		return
+	}
+
+	select {
+	case resp, ok := <-ch:
+		if !ok {
+			http.Error(w, "tunnel closed", http.StatusBadGateway)
+			return
+		}
+		writeResp(w, resp)
+	case <-time.After(60 * time.Second):
+		t.mu.Lock()
+		delete(t.pending, id)
+		t.mu.Unlock()
+		http.Error(w, "upstream timeout", http.StatusGatewayTimeout)
+	}
+}
+
+func writeResp(w http.ResponseWriter, resp frame) {
+	h := w.Header()
+	for k, vs := range resp.Headers {
+		for _, v := range vs {
+			h.Add(k, v)
+		}
+	}
+	status := resp.Status
+	if status == 0 {
+		status = http.StatusBadGateway
+	}
+	body, _ := base64.StdEncoding.DecodeString(resp.Body)
+	w.WriteHeader(status)
+	w.Write(body)
 }

@@ -1,12 +1,10 @@
 # Render deploys this via Docker. Root Directory = relay
 FROM golang:1.23-alpine AS build
-# Let Go auto-download the newer toolchain that tailscale.com requires.
-ENV GOTOOLCHAIN=auto
 WORKDIR /src
 COPY go.mod .
 COPY main.go .
-# Resolve tailscale.com at build time (avoids shipping go.sum).
-RUN go get tailscale.com/tsnet@latest && go mod tidy \
+# Resolve deps at build time (avoids shipping go.sum).
+RUN go get github.com/coder/websocket@latest && go mod tidy \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /relay .
 
 FROM gcr.io/distroless/static-debian12
