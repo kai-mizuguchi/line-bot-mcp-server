@@ -8,8 +8,9 @@
 // LINE directly outbound.
 //
 // Env:
-//   TUNNEL_SECRET  shared secret; the Wii must present it to open /_tunnel. Required.
-//   PORT           public listen port (Render sets this).
+//
+//	TUNNEL_SECRET  shared secret; the Wii must present it to open /_tunnel. Required.
+//	PORT           public listen port (Render sets this).
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -139,7 +141,44 @@ func serveTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// allowedRequest reports whether a public request maps to a real bot route.
+// Everything else is rejected at the relay so it never reaches the Wii.
+func allowedRequest(method, path string) bool {
+	switch {
+	case method == http.MethodGet && (path == "/" || path == "/health"):
+		return true
+	case method == http.MethodPost && path == "/webhook":
+		return true
+	case method == http.MethodGet && isSetlistPath(path):
+		return true
+	default:
+		return false
+	}
+}
+
+// isSetlistPath matches /tmp/setlist-<digits>.png, mirroring the bot's own guard.
+func isSetlistPath(path string) bool {
+	name, ok := strings.CutPrefix(path, "/tmp/setlist-")
+	if !ok {
+		return false
+	}
+	digits, ok := strings.CutSuffix(name, ".png")
+	if !ok || digits == "" {
+		return false
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func proxyToTunnel(w http.ResponseWriter, r *http.Request) {
+	if !allowedRequest(r.Method, r.URL.Path) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
 	t := cur.Load()
 	if t == nil {
 		http.Error(w, "tunnel offline", http.StatusServiceUnavailable)
